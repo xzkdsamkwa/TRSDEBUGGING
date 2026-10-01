@@ -12,7 +12,7 @@ local ENV = getfenv()
 local CONFIG = {
     PlaceId = 93531785397649,
     Title = "THE REVENANT: SUNRISEN MOD MENU HAPPYMOD",
-    ConfigFile = "RevenantSunrisen_HappyMod.json",
+    ConfigFile = "RevenantSunrisen_CheatMenuConfig.json",
 
     RevenantNameMatch = { "revenant" },
     MatchAnyNPC = false,
@@ -1717,7 +1717,6 @@ do
                                 task.wait(0.05)
                                 fireSignal(tool.Deactivated, function() tool:Deactivate() end)
                                 RevFarm.lastSwingAt = tick()
-                                stopAnimations()
                             end
                             local hum2 = m:FindFirstChildOfClass("Humanoid")
                             local hp = hum2 and math.floor(hum2.Health) or 0
