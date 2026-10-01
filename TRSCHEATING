@@ -1454,9 +1454,6 @@ do -- scrap farming block
     end)
 end -- end scrap farming block
 
-----------------------------------------------------------------------
--- AUTO FARM REVENANT
-----------------------------------------------------------------------
 do
     local function normName(s) return (tostring(s):lower():gsub("[^%w]", "")) end
     local function revPartFor(m)
@@ -1525,7 +1522,7 @@ do
             reportRevEvent("Farm Stopped", nil, {{ name = "Session Kills", value = tostring(RevFarm.kills) }}, 0x888888)
         else
             RevFarm.kills = 0
-            notify("Auto Farm Revenant started — tool: " .. esc(RevFarm.tool), "farm")
+            notify("Auto Farm Revenant started, tool: " .. esc(RevFarm.tool), "farm")
             reportRevEvent("Farm Started", nil, {{ name = "Tool", value = RevFarm.tool, inline = true }}, 0x46C86E)
         end
     end)
@@ -1701,7 +1698,7 @@ do
                             if RevFarm.stuckTimer > STUCK_THRESHOLD then
                                 if tick() - lastNotifyStuck > 30 then
                                     lastNotifyStuck = tick()
-                                    notify("No revenant found — waiting for spawn...", "warn")
+                                    notify("No revenant found, waiting for spawn...", "warn")
                                     reportRevEvent("Waiting for Revenant Spawn", nil, {
                                         { name = "Session Kills", value = tostring(RevFarm.kills) },
                                     }, 0x888888)
@@ -1732,9 +1729,6 @@ do
     end)
 end -- end auto farm revenant block
 
-----------------------------------------------------------------------
--- POWER STATION
-----------------------------------------------------------------------
 local function findPowerStation()
     return workspace:FindFirstChild(CONFIG.PowerStationName, true)
 end
