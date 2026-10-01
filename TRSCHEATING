@@ -3,7 +3,6 @@ local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LogService       = game:GetService("LogService")
 local HttpService      = game:GetService("HttpService")
-local Stats            = game:GetService("Stats")
 local CoreGui          = game:GetService("CoreGui")
 local TweenService     = game:GetService("TweenService")
 
@@ -12,19 +11,15 @@ local ENV = getfenv()
 
 local CONFIG = {
     PlaceId = 93531785397649,
+    Title = "THE REVENANT: SUNRISEN MOD MENU HAPPYMOD",
+    ConfigFile = "RevenantSunrisen_HappyMod.json",
 
     RevenantNameMatch = { "revenant" },
     MatchAnyNPC = false,
 
     ScrapAttribute = "ForcedClass",
     ScrapTypes = { "Golden", "Cursed" },
-    FarmTypes  = { "Golden" },
-    ScrapExtraHold = 0,          -- hold duration forced to 0 for prompts
-    ScrapHoldOverride = 0,       -- set proximity prompt HoldDuration to this
-
-    ScrapCounterMatch = "Scraps",
-    ScrapMaxDefault = 5,
-    ScrapMaxLimit = 9,
+    ScrapHoldOverride = 0,
 
     ShopPos1Name = "ShopPart",
     ShopPos2Name = "ShopPart2",
@@ -54,25 +49,63 @@ local CONFIG = {
 
     TeleportOffset = Vector3.new(0, 3, 0),
     ScrapRetryCooldown = 8,
-    ToggleKey = Enum.KeyCode.RightShift,
     MaxConsoleLines = 250,
 
-    -- Rage Spell current names to remove
-    RageSpellFOVCurrent   = { "RageFOV", "RageFov", "FOVRage", "SpellFOV", "RageSpellFOV" },
+    RageSpellFOVCurrent = { "RageFOV", "RageFov", "FOVRage", "SpellFOV", "RageSpellFOV" },
 }
+CONFIG.ToggleKey = Enum.KeyCode.RightShift
 
 if _G.__RevenantDebugClose then pcall(_G.__RevenantDebugClose) end
 
 if game.PlaceId ~= CONFIG.PlaceId then
-    warn(("[RevenantDebug] PlaceId mismatch (%d ~= %d), loading anyway."):format(game.PlaceId, CONFIG.PlaceId))
+    warn(("[HappyMod] PlaceId mismatch (%d ~= %d), loading anyway."):format(game.PlaceId, CONFIG.PlaceId))
 end
 
 local alive = true
 local conns = {}
 local toggles = {}
 local flags = {}
+local toggleReg, sliderReg, settingsReg = {}, {}, {}
+local bindMode, bindDone = nil, 0
+local loadingDone = false
 
 local function track(c) conns[#conns + 1] = c return c end
+
+local canSave = (ENV.writefile ~= nil) and (ENV.readfile ~= nil) and (ENV.isfile ~= nil)
+local Saved = {}
+if canSave then
+    local ok, data = pcall(function()
+        if ENV.isfile(CONFIG.ConfigFile) then
+            return HttpService:JSONDecode(ENV.readfile(CONFIG.ConfigFile))
+        end
+    end)
+    if ok and type(data) == "table" then Saved = data end
+end
+
+local S = {
+    Theme = "Crimson",
+    NotifOff = false,
+    NotifDuration = 4,
+    Transparency = 0,
+    Scale = 100,
+    ShowLoading = true,
+    RestoreToggles = true,
+    AutoSave = true,
+    ToggleKey = "RightShift",
+    StaminaKey = "",
+}
+if type(Saved.settings) == "table" then
+    for k, v in pairs(Saved.settings) do
+        if S[k] ~= nil and type(S[k]) == type(v) then S[k] = v end
+    end
+end
+S.NotifDuration = math.clamp(S.NotifDuration, 1, 10)
+S.Transparency  = math.clamp(S.Transparency, 0, 60)
+S.Scale         = math.clamp(S.Scale, 70, 130)
+do
+    local ok, k = pcall(function() return Enum.KeyCode[S.ToggleKey] end)
+    if ok and k then CONFIG.ToggleKey = k end
+end
 
 local function new(class, props, children)
     local o = Instance.new(class)
@@ -108,17 +141,6 @@ end
 local function teleportTo(cf)
     local hrp = getHRP()
     if hrp then hrp.CFrame = cf + CONFIG.TeleportOffset end
-end
-
-local function findPrompt(inst, stopAt)
-    local cur = inst
-    for _ = 0, 4 do
-        if not cur or cur == workspace or cur == stopAt then break end
-        local p = cur:FindFirstChildWhichIsA("ProximityPrompt", true)
-        if p then return p end
-        cur = cur.Parent
-    end
-    return nil
 end
 
 local function promptCFrame(prompt, fallbackInst)
@@ -185,6 +207,14 @@ local function getCurrentsFolder()
     if not cd then return nil end
     local ps = cd:FindFirstChild("PlayerStuff")
     return ps and ps:FindFirstChild("Currents")
+end
+
+-- also used later as getCurrents_legacy
+local function getCurrents_legacy()
+    local cd = game:GetService("ReplicatedStorage"):FindFirstChild("CharacterData")
+    local mine = cd and cd:FindFirstChild(LP.Name)
+    local stuff = mine and mine:FindFirstChild("PlayerStuff")
+    return stuff and stuff:FindFirstChild("Currents")
 end
 
 local injectedCurrents = {}
@@ -299,17 +329,37 @@ local function manageNumCurrent(name, value, enabled)
     end
 end
 
-----------------------------------------------------------------------
--- UI THEME
-----------------------------------------------------------------------
-local T = {
-    bg = Color3.fromRGB(22, 22, 28), top = Color3.fromRGB(32, 32, 40), side = Color3.fromRGB(27, 27, 34),
-    row = Color3.fromRGB(38, 38, 48), accent = Color3.fromRGB(205, 50, 60),
-    text = Color3.fromRGB(232, 232, 238), dim = Color3.fromRGB(150, 150, 162),
-    on = Color3.fromRGB(70, 200, 110), off = Color3.fromRGB(72, 72, 86),
-    blue = Color3.fromRGB(80, 140, 220), purple = Color3.fromRGB(140, 80, 220),
+local THEMES = {
+    Crimson = { bg = Color3.fromRGB(22, 22, 28), top = Color3.fromRGB(32, 32, 40), side = Color3.fromRGB(27, 27, 34),
+        row = Color3.fromRGB(38, 38, 48), accent = Color3.fromRGB(205, 50, 60), text = Color3.fromRGB(232, 232, 238),
+        dim = Color3.fromRGB(150, 150, 162), off = Color3.fromRGB(72, 72, 86), stroke = Color3.fromRGB(60, 60, 74) },
+    Ocean = { bg = Color3.fromRGB(16, 22, 32), top = Color3.fromRGB(24, 34, 48), side = Color3.fromRGB(19, 27, 40),
+        row = Color3.fromRGB(30, 44, 62), accent = Color3.fromRGB(48, 140, 230), text = Color3.fromRGB(232, 238, 245),
+        dim = Color3.fromRGB(140, 156, 176), off = Color3.fromRGB(66, 82, 104), stroke = Color3.fromRGB(50, 66, 90) },
+    Forest = { bg = Color3.fromRGB(18, 26, 22), top = Color3.fromRGB(26, 38, 32), side = Color3.fromRGB(21, 31, 26),
+        row = Color3.fromRGB(32, 48, 40), accent = Color3.fromRGB(60, 180, 100), text = Color3.fromRGB(232, 242, 236),
+        dim = Color3.fromRGB(146, 168, 154), off = Color3.fromRGB(66, 92, 76), stroke = Color3.fromRGB(50, 72, 60) },
+    Violet = { bg = Color3.fromRGB(24, 20, 34), top = Color3.fromRGB(34, 28, 48), side = Color3.fromRGB(28, 23, 41),
+        row = Color3.fromRGB(42, 35, 60), accent = Color3.fromRGB(150, 90, 230), text = Color3.fromRGB(238, 232, 246),
+        dim = Color3.fromRGB(160, 150, 176), off = Color3.fromRGB(80, 70, 102), stroke = Color3.fromRGB(66, 56, 92) },
+    Sunset = { bg = Color3.fromRGB(30, 22, 20), top = Color3.fromRGB(42, 30, 26), side = Color3.fromRGB(35, 26, 23),
+        row = Color3.fromRGB(54, 40, 34), accent = Color3.fromRGB(240, 140, 50), text = Color3.fromRGB(246, 238, 230),
+        dim = Color3.fromRGB(176, 158, 146), off = Color3.fromRGB(100, 80, 68), stroke = Color3.fromRGB(82, 62, 52) },
+    Mono = { bg = Color3.fromRGB(20, 20, 20), top = Color3.fromRGB(30, 30, 30), side = Color3.fromRGB(25, 25, 25),
+        row = Color3.fromRGB(40, 40, 40), accent = Color3.fromRGB(175, 175, 180), text = Color3.fromRGB(240, 240, 240),
+        dim = Color3.fromRGB(140, 140, 140), off = Color3.fromRGB(80, 80, 80), stroke = Color3.fromRGB(60, 60, 60) },
 }
+local THEME_ORDER = { "Crimson", "Ocean", "Forest", "Violet", "Sunset", "Mono" }
+local THEME_KEYS = { "bg", "top", "side", "row", "accent", "text", "dim", "off", "stroke" }
 
+local T = {
+    on = Color3.fromRGB(70, 200, 110), blue = Color3.fromRGB(80, 140, 220), purple = Color3.fromRGB(140, 80, 220),
+}
+for k, v in pairs(THEMES.Crimson) do T[k] = v end
+
+----------------------------------------------------------------------
+-- GUI ROOT
+----------------------------------------------------------------------
 local gui = new("ScreenGui", {
     Name = "RevenantDebug", ResetOnSpawn = false, DisplayOrder = 999,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling, IgnoreGuiInset = true,
@@ -319,177 +369,219 @@ if not okParent or not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui")
 
 local espFolder = new("Folder", { Name = "ESP", Parent = gui })
 
--- Notification layer sits at top level of the ScreenGui, NOT inside win
+local function setTheme(name)
+    local th = THEMES[name]
+    if not th then return end
+    local map = {}
+    for _, k in ipairs(THEME_KEYS) do
+        if T[k] ~= th[k] then map[T[k]:ToHex()] = th[k] end
+    end
+    local function swap(inst, prop)
+        local ok, c = pcall(function() return inst[prop] end)
+        if ok and typeof(c) == "Color3" then
+            local n = map[c:ToHex()]
+            if n then pcall(function() inst[prop] = n end) end
+        end
+    end
+    for _, d in ipairs(gui:GetDescendants()) do
+        if not d:IsDescendantOf(espFolder) and not d:GetAttribute("NoTheme") then
+            if d:IsA("GuiObject") then swap(d, "BackgroundColor3") end
+            if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then swap(d, "TextColor3") end
+            if d:IsA("TextBox") then swap(d, "PlaceholderColor3") end
+            if d:IsA("UIStroke") then swap(d, "Color") end
+        end
+    end
+    for _, k in ipairs(THEME_KEYS) do T[k] = th[k] end
+    S.Theme = name
+end
+
+----------------------------------------------------------------------
+-- NOTIFICATIONS
+----------------------------------------------------------------------
+local NOTIF = {
+    success = { c1 = Color3.fromRGB(38, 160, 96),  c2 = Color3.fromRGB(18, 78, 78),  bar = Color3.fromRGB(120, 255, 170), icon = "✓" },
+    error   = { c1 = Color3.fromRGB(210, 52, 66),  c2 = Color3.fromRGB(86, 20, 54),  bar = Color3.fromRGB(255, 130, 140), icon = "✕" },
+    info    = { c1 = Color3.fromRGB(62, 124, 224), c2 = Color3.fromRGB(78, 44, 150), bar = Color3.fromRGB(150, 190, 255), icon = "i" },
+    warn    = { c1 = Color3.fromRGB(232, 166, 34), c2 = Color3.fromRGB(150, 70, 24), bar = Color3.fromRGB(255, 220, 130), icon = "!" },
+    farm    = { c1 = Color3.fromRGB(248, 186, 0),  c2 = Color3.fromRGB(122, 64, 12), bar = Color3.fromRGB(255, 236, 150), icon = "★" },
+    neutral = { c1 = Color3.fromRGB(74, 78, 98),   c2 = Color3.fromRGB(34, 36, 48),  bar = Color3.fromRGB(170, 174, 190), icon = "•" },
+}
+
 local notifLayer = new("Frame", {
-    Name = "NotifLayer",
-    AnchorPoint = Vector2.new(1, 1),
-    Position = UDim2.new(1, -12, 1, -12),
-    Size = UDim2.fromOffset(280, 0),
-    AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1,
-    ZIndex = 500,
-    Parent = gui,
+    Name = "NotifLayer", AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -12, 1, -12),
+    Size = UDim2.fromOffset(290, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+    ZIndex = 500, Parent = gui,
 }, {
     new("UIListLayout", {
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        FillDirection = Enum.FillDirection.Vertical,
-        VerticalAlignment = Enum.VerticalAlignment.Bottom,
-        HorizontalAlignment = Enum.HorizontalAlignment.Right,
+        SortOrder = Enum.SortOrder.LayoutOrder, FillDirection = Enum.FillDirection.Vertical,
+        VerticalAlignment = Enum.VerticalAlignment.Bottom, HorizontalAlignment = Enum.HorizontalAlignment.Right,
         Padding = UDim.new(0, 6),
     }),
 })
 
 local notifCounter = 0
-local function notify(message, color)
-    notifCounter += 1
-    local lo = notifCounter
-    color = color or T.accent
+local activeNotifs = {}
 
+local function notify(message, kind)
+    if S.NotifOff then return end
+    local style = NOTIF[kind] or NOTIF.neutral
+    notifCounter += 1
+
+    local stroke = new("UIStroke", { Color = style.c1, Thickness = 1.2, Transparency = 1 })
     local frame = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundColor3 = T.top,
-        BackgroundTransparency = 0.05,
-        LayoutOrder = -lo,
-        ZIndex = 500,
-        Parent = notifLayer,
+        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 1,
+        LayoutOrder = notifCounter,
+        ZIndex = 500, Parent = notifLayer,
     }, {
         corner(6),
-        new("UIStroke", { Color = color, Thickness = 1.2, Transparency = 0.3 }),
+        new("UIGradient", { Color = ColorSequence.new(style.c1, style.c2), Rotation = 0 }),
+        stroke,
         new("UIPadding", {
-            PaddingTop = UDim.new(0, 8),
-            PaddingBottom = UDim.new(0, 8),
-            PaddingLeft = UDim.new(0, 10),
-            PaddingRight = UDim.new(0, 10),
+            PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
+            PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
         }),
     })
 
-    local accent = new("Frame", {
-        Size = UDim2.new(0, 3, 1, 0),
-        Position = UDim2.fromOffset(0, 0),
-        BackgroundColor3 = color,
-        ZIndex = 501,
-        Parent = frame,
+    local bar = new("Frame", {
+        Size = UDim2.new(0, 3, 1, 0), BackgroundColor3 = style.bar, BackgroundTransparency = 1,
+        BorderSizePixel = 0, ZIndex = 501, Parent = frame,
     }, { corner(3) })
 
     local lbl = new("TextLabel", {
-        Position = UDim2.fromOffset(10, 0),
-        Size = UDim2.new(1, -14, 1, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1,
-        Text = message,
-        TextColor3 = T.text,
-        Font = Enum.Font.GothamMedium,
-        TextSize = 12,
-        TextWrapped = true,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        RichText = true,
-        ZIndex = 501,
-        Parent = frame,
+        Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -14, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1, Text = style.icon .. "  " .. message, TextColor3 = Color3.new(1, 1, 1),
+        TextTransparency = 1, Font = Enum.Font.GothamMedium, TextSize = 12, TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left, RichText = true, ZIndex = 501, Parent = frame,
+    })
+    lbl:SetAttribute("NoTheme", true)
+    bar:SetAttribute("NoTheme", true)
+    frame:SetAttribute("NoTheme", true)
+
+    local hitbox = new("TextButton", {
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", ZIndex = 502, Parent = frame,
     })
 
-    -- tap to dismiss
-    local hitbox = new("TextButton", {
-        Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1,
-        Text = "",
-        ZIndex = 502,
-        Parent = frame,
-    })
+    local ti = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    TweenService:Create(frame, ti, { BackgroundTransparency = 0.05 }):Play()
+    TweenService:Create(stroke, ti, { Transparency = 0.35 }):Play()
+    TweenService:Create(bar, ti, { BackgroundTransparency = 0 }):Play()
+    TweenService:Create(lbl, ti, { TextTransparency = 0 }):Play()
 
     local dismissed = false
-    local function dismiss()
+    local dismiss
+    dismiss = function()
         if dismissed then return end
         dismissed = true
-        local ti = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-        local tw = TweenService:Create(frame, ti, { BackgroundTransparency = 1 })
-        TweenService:Create(lbl, ti, { TextTransparency = 1 }):Play()
-        TweenService:Create(accent, ti, { BackgroundTransparency = 1 }):Play()
-        tw:Play()
+        local i = table.find(activeNotifs, dismiss)
+        if i then table.remove(activeNotifs, i) end
+        local to = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        local tw = TweenService:Create(frame, to, { BackgroundTransparency = 1 })
+        TweenService:Create(stroke, to, { Transparency = 1 }):Play()
+        TweenService:Create(bar, to, { BackgroundTransparency = 1 }):Play()
+        TweenService:Create(lbl, to, { TextTransparency = 1 }):Play()
         tw.Completed:Connect(function() pcall(function() frame:Destroy() end) end)
+        tw:Play()
     end
 
     track(hitbox.Activated:Connect(dismiss))
-
-    task.delay(4, dismiss)
+    activeNotifs[#activeNotifs + 1] = dismiss
+    while #activeNotifs > 6 do activeNotifs[1]() end
+    task.delay(S.NotifDuration, dismiss)
 end
 
+----------------------------------------------------------------------
+-- WINDOW
+----------------------------------------------------------------------
 local win = new("Frame", {
     Name = "Window", Size = UDim2.fromOffset(580, 420), Position = UDim2.new(0.5, -290, 0.5, -210),
-    BackgroundColor3 = T.bg, BorderSizePixel = 0, ClipsDescendants = true, Parent = gui,
-}, { corner(8), new("UIStroke", { Color = Color3.fromRGB(60, 60, 74), Thickness = 1 }) })
+    BackgroundColor3 = T.bg, BorderSizePixel = 0, ClipsDescendants = true, Visible = false, Parent = gui,
+}, { corner(8), new("UIStroke", { Color = T.stroke, Thickness = 1 }) })
+local uiScale = new("UIScale", { Parent = win })
 
-local titleBar = new("Frame", { Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = T.top, BorderSizePixel = 0, Parent = win })
-new("TextLabel", {
-    BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -90, 1, 0),
-    Text = "THE REVENANT: Sunrisen  |  Debug", TextColor3 = T.text, Font = Enum.Font.GothamBold,
-    TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, Parent = titleBar,
-})
-
-local function titleButton(text, xOffset, color)
-    return new("TextButton", {
-        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xOffset, 0.5, 0), Size = UDim2.fromOffset(24, 22),
-        BackgroundColor3 = color, Text = text, TextColor3 = T.text, Font = Enum.Font.GothamBold, TextSize = 13,
-        AutoButtonColor = true, Parent = titleBar,
-    }, { corner(5) })
-end
-local closeBtn = titleButton("X", -6, T.accent)
-local minBtn = titleButton("-", -36, T.off)
-
-local body = new("Frame", { Position = UDim2.fromOffset(0, 32), Size = UDim2.new(1, 0, 1, -32), BackgroundTransparency = 1, Parent = win })
-local sidebar = new("Frame", { Size = UDim2.new(0, 112, 1, 0), BackgroundColor3 = T.side, BorderSizePixel = 0, Parent = body }, {
-    new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }),
-    new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }),
-})
-local content = new("Frame", { Position = UDim2.fromOffset(112, 0), Size = UDim2.new(1, -112, 1, 0), BackgroundTransparency = 1, Parent = body })
-
-local grip = new("TextButton", {
-    AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1), Size = UDim2.fromOffset(18, 18),
-    BackgroundTransparency = 1, Text = "◢", TextColor3 = T.dim, TextSize = 14, Font = Enum.Font.GothamBold,
-    ZIndex = 20, Parent = win,
-})
-
-local function dragHandle(handle, onStart, onDelta)
-    local active, origin = false, nil
-    track(handle.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            active, origin = true, i.Position
-            onStart()
-            local c; c = i.Changed:Connect(function()
-                if i.UserInputState == Enum.UserInputState.End then active = false c:Disconnect() end
-            end)
-        end
-    end))
-    track(UserInputService.InputChanged:Connect(function(i)
-        if active and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-            onDelta(i.Position - origin)
-        end
-    end))
+local function applyLook()
+    win.BackgroundTransparency = S.Transparency / 100
+    uiScale.Scale = S.Scale / 100
 end
 
-local startPos, startSize
-dragHandle(titleBar, function() startPos = win.Position end, function(d)
-    win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-end)
-dragHandle(grip, function() startSize = win.AbsoluteSize end, function(d)
-    win.Size = UDim2.fromOffset(math.max(400, startSize.X + d.X), math.max(260, startSize.Y + d.Y))
-end)
+-- titleBar, sidebar, content, closeBtn declared outside do block so they're accessible later
+local titleBar, sidebar, content, closeBtn
 
-local minimized, fullSize = false, nil
-track(minBtn.Activated:Connect(function()
-    minimized = not minimized
-    if minimized then
-        fullSize = win.Size
-        body.Visible, grip.Visible = false, false
-        win.Size = UDim2.fromOffset(win.AbsoluteSize.X, 32)
-    else
-        body.Visible, grip.Visible = true, true
-        win.Size = fullSize
+do
+    titleBar = new("Frame", { Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = T.top, BorderSizePixel = 0, Parent = win })
+    new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -90, 1, 0),
+        Text = CONFIG.Title, TextColor3 = T.text, Font = Enum.Font.GothamBold,
+        TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = titleBar,
+    })
+
+    local function titleButton(text, xOffset, color)
+        return new("TextButton", {
+            AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xOffset, 0.5, 0), Size = UDim2.fromOffset(24, 22),
+            BackgroundColor3 = color, Text = text, TextColor3 = T.text, Font = Enum.Font.GothamBold, TextSize = 13,
+            AutoButtonColor = true, Parent = titleBar,
+        }, { corner(5) })
     end
-end))
+    closeBtn = titleButton("X", -6, T.accent)
+    local minBtn = titleButton("-", -36, T.off)
+
+    local body = new("Frame", { Position = UDim2.fromOffset(0, 32), Size = UDim2.new(1, 0, 1, -32), BackgroundTransparency = 1, Parent = win })
+    sidebar = new("Frame", { Size = UDim2.new(0, 112, 1, 0), BackgroundColor3 = T.side, BorderSizePixel = 0, Parent = body }, {
+        new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }),
+        new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }),
+    })
+    content = new("Frame", { Position = UDim2.fromOffset(112, 0), Size = UDim2.new(1, -112, 1, 0), BackgroundTransparency = 1, Parent = body })
+
+    local grip = new("TextButton", {
+        AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1), Size = UDim2.fromOffset(18, 18),
+        BackgroundTransparency = 1, Text = "◢", TextColor3 = T.dim, TextSize = 14, Font = Enum.Font.GothamBold,
+        ZIndex = 20, Parent = win,
+    })
+
+    local function dragHandle(handle, onStart, onDelta)
+        local active, origin = false, nil
+        track(handle.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                active, origin = true, i.Position
+                onStart()
+                local c; c = i.Changed:Connect(function()
+                    if i.UserInputState == Enum.UserInputState.End then active = false c:Disconnect() end
+                end)
+            end
+        end))
+        track(UserInputService.InputChanged:Connect(function(i)
+            if active and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                onDelta(i.Position - origin)
+            end
+        end))
+    end
+
+    local startPos, startSize
+    dragHandle(titleBar, function() startPos = win.Position end, function(d)
+        win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    end)
+    dragHandle(grip, function() startSize = Vector2.new(win.Size.X.Offset, win.Size.Y.Offset) end, function(d)
+        local s = uiScale.Scale
+        win.Size = UDim2.fromOffset(math.max(400, startSize.X + d.X / s), math.max(260, startSize.Y + d.Y / s))
+    end)
+
+    local minimized, fullSize = false, nil
+    track(minBtn.Activated:Connect(function()
+        minimized = not minimized
+        if minimized then
+            fullSize = win.Size
+            body.Visible, grip.Visible = false, false
+            win.Size = UDim2.fromOffset(win.Size.X.Offset, 32)
+        else
+            body.Visible, grip.Visible = true, true
+            win.Size = fullSize
+        end
+    end))
+end -- end window do block
 
 track(UserInputService.InputBegan:Connect(function(i, gp)
-    if not gp and i.KeyCode == CONFIG.ToggleKey then gui.Enabled = not gui.Enabled end
+    if bindMode or tick() - bindDone < 0.25 then return end
+    if not gp and loadingDone and i.KeyCode == CONFIG.ToggleKey then win.Visible = not win.Visible end
 end))
 
 local lo = 0
@@ -514,14 +606,16 @@ local function addSection(parent, text)
 end
 
 local function addSectionColored(parent, text, color)
-    return new("TextLabel", {
+    local l = new("TextLabel", {
         Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = string.upper(text), TextColor3 = color or T.accent,
         Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = nextLO(), Parent = parent,
     })
+    l:SetAttribute("NoTheme", true)
+    return l
 end
 
-local function addToggle(parent, text, default, cb)
+local function addToggle(parent, text, default, cb, opts)
     local btn = new("TextButton", {
         Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = T.row, Text = "", AutoButtonColor = false,
         LayoutOrder = nextLO(), Parent = parent,
@@ -536,21 +630,24 @@ local function addToggle(parent, text, default, cb)
     }, { corner(9) })
     local knob = new("Frame", { Size = UDim2.fromOffset(14, 14), Position = UDim2.fromOffset(2, 2), BackgroundColor3 = Color3.new(1, 1, 1), Parent = sw }, { corner(7) })
 
-    local obj = { State = false }
-    function obj:Set(v)
+    local obj = { State = false, Kind = "toggle", Name = text }
+    function obj:Set(v, silent)
         if self.State == v then return end
         self.State = v
         sw.BackgroundColor3 = v and T.on or T.off
         knob.Position = v and UDim2.fromOffset(20, 2) or UDim2.fromOffset(2, 2)
         task.spawn(function()
             local ok, err = pcall(cb, v)
-            if not ok then warn("[RevenantDebug] toggle '" .. text .. "' error: " .. tostring(err)) end
+            if not ok then warn("[HappyMod] toggle '" .. text .. "' error: " .. tostring(err)) end
         end)
-        notify((v and "✓ Enabled: " or "✗ Disabled: ") .. text, v and T.on or T.dim)
+        if not silent then
+            notify((v and "Enabled: " or "Disabled: ") .. esc(text), v and "success" or "neutral")
+        end
     end
     track(btn.Activated:Connect(function() obj:Set(not obj.State) end))
     toggles[#toggles + 1] = obj
-    if default then task.defer(function() obj:Set(true) end) end
+    if opts and opts.setting then settingsReg[opts.setting] = obj else toggleReg[text] = obj end
+    if default then task.defer(function() obj:Set(true, true) end) end
     return obj
 end
 
@@ -582,7 +679,6 @@ local function addTextbox(parent, placeholder, cb)
     return tb
 end
 
--- Help popup (inside win, but above everything)
 local helpPopup = new("Frame", {
     AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(320, 190),
     BackgroundColor3 = T.top, Visible = false, Active = true, ZIndex = 30, Parent = win,
@@ -618,7 +714,7 @@ local function addSectionHelp(parent, text, help)
     return row
 end
 
-local function addSlider(parent, text, min, max, default, cb)
+local function addSlider(parent, text, min, max, default, cb, opts)
     local holder = new("Frame", { Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = T.row, LayoutOrder = nextLO(), Parent = parent }, { corner(6) })
     local lbl = new("TextLabel", {
         BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 4), Size = UDim2.new(1, -20, 0, 16), Text = text,
@@ -628,7 +724,7 @@ local function addSlider(parent, text, min, max, default, cb)
     local fill = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = T.accent, BorderSizePixel = 0, Parent = bar }, { corner(3) })
     local hit = new("TextButton", { Position = UDim2.new(0, 10, 0, 22), Size = UDim2.new(1, -20, 0, 22), BackgroundTransparency = 1, Text = "", Parent = holder })
 
-    local obj = { Value = default, Locked = false, Label = lbl }
+    local obj = { Value = default, Locked = false, Label = lbl, Kind = "slider" }
     function obj:Set(v, silent)
         v = math.clamp(math.floor(v + 0.5), min, max)
         self.Value = v
@@ -663,6 +759,7 @@ local function addSlider(parent, text, min, max, default, cb)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
     end))
     obj:Set(default, true)
+    if opts and opts.setting then settingsReg[opts.setting] = obj elseif opts and opts.save then sliderReg[opts.save] = obj end
     return obj
 end
 
@@ -710,17 +807,66 @@ local function addSubTabs(page, names, btnWidth)
     return subs
 end
 
-----------------------------------------------------------------------
--- WEBHOOK  (no username mentions)
-----------------------------------------------------------------------
-local webhookUrl = ""
+local loadUI
+if S.ShowLoading then
+    local frame = new("TextButton", {
+        Name = "Loading", Size = UDim2.fromScale(1, 1), BackgroundColor3 = T.bg, BackgroundTransparency = 0.9,
+        BorderSizePixel = 0, Text = "", AutoButtonColor = false, ZIndex = 900, Parent = gui,
+    })
+    local card = new("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(440, 214),
+        BackgroundColor3 = T.top, ZIndex = 901, Parent = frame,
+    }, { corner(12), new("UIStroke", { Color = T.accent, Thickness = 1.5 }) })
+    local title = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(20, 20), Size = UDim2.new(1, -40, 0, 68),
+        Text = CONFIG.Title, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBlack, TextSize = 24,
+        TextWrapped = true, ZIndex = 902, Parent = card,
+    })
+    title:SetAttribute("NoTheme", true)
+    local grad = new("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, T.accent),
+            ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 214, 90)),
+            ColorSequenceKeypoint.new(1, T.accent),
+        }),
+        Parent = title,
+    })
+    new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(20, 90), Size = UDim2.new(1, -40, 0, 16),
+        Text = "THE TUNG SAHUR SUNRISEN v1 * MADE BY #$(#!(%$(#!)%(*)!#)(*))", TextColor3 = T.dim, Font = Enum.Font.Gotham, TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 902, Parent = card,
+    })
+    local status = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(20, 120), Size = UDim2.new(1, -90, 0, 18),
+        Text = "Starting...", TextColor3 = T.text, Font = Enum.Font.GothamMedium, TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 902, Parent = card,
+    })
+    local pct = new("TextLabel", {
+        AnchorPoint = Vector2.new(1, 0), BackgroundTransparency = 1, Position = UDim2.new(1, -20, 0, 120), Size = UDim2.fromOffset(50, 18),
+        Text = "0%", TextColor3 = T.dim, Font = Enum.Font.GothamBold, TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Right, ZIndex = 902, Parent = card,
+    })
+    local track_ = new("Frame", {
+        Position = UDim2.fromOffset(20, 148), Size = UDim2.new(1, -40, 0, 10), BackgroundColor3 = T.off, ZIndex = 902, Parent = card,
+    }, { corner(5) })
+    local fill = new("Frame", {
+        Size = UDim2.fromScale(0, 1), BackgroundColor3 = T.accent, BorderSizePixel = 0, ZIndex = 903, Parent = track_,
+    }, { corner(5) })
+    new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(20, 180), Size = UDim2.new(1, -40, 0, 14),
+        Text = "tap anywhere to skip", TextColor3 = T.dim, Font = Enum.Font.Gotham, TextSize = 11, ZIndex = 902, Parent = card,
+    })
+    loadUI = { frame = frame, grad = grad, status = status, pct = pct, fill = fill }
+end
+
+local webhookUrl = (type(Saved.webhook) == "string") and Saved.webhook or ""
 local httpRequest = ENV.request or ENV.http_request or (ENV.syn and ENV.syn.request) or (ENV.http and ENV.http.request)
 
 local function sendWebhook(title, fields, color, force)
     if not force and not flags.Webhook then return end
     if webhookUrl == "" then return end
     local body = HttpService:JSONEncode({
-        username = "Revenant Debug",
+        username = "Revenant Cheat Menu",
         embeds = {{ title = title, color = color or 0xCD323C, fields = fields or {}, timestamp = DateTime.now():ToIsoDate() }},
     })
     if httpRequest then
@@ -730,9 +876,6 @@ local function sendWebhook(title, fields, color, force)
     end
 end
 
-----------------------------------------------------------------------
--- NPC PAGE
-----------------------------------------------------------------------
 local npcPage = addTab("NPCs", true)
 local revenants = {}
 local revESP = {}
@@ -740,12 +883,8 @@ local selectedModel, cycleIdx = nil, 0
 
 local RevFarm = {
     tool = CONFIG.RevFarmDefaultTool, head = true, body = "Torso", dist = CONFIG.RevFarmDistance,
-    camAim = true, camHeld = false, rows = {}, custom = {}, target = nil, kills = 0, status = nil, toggle = nil,
-    -- resilience tracking
-    lastSwingAt = 0,
-    lastTargetId = nil,
-    stuckTimer = 0,
-    reEquipCooldown = 0,
+    camAim = true, camHeld = false, rows = {}, custom = {}, customList = {}, target = nil, kills = 0, status = nil, toggle = nil,
+    lastSwingAt = 0, lastTargetId = nil, stuckTimer = 0, reEquipCooldown = 0,
 }
 
 local revHum = {}
@@ -771,111 +910,102 @@ local function isRevenant(m)
     return CONFIG.MatchAnyNPC
 end
 
-local function reportRevEvent(title, m, extraFields, color)
-    if not flags.WebhookRev then return end
-    local part = partOf(m)
-    local pos = part and part.Position or Vector3.zero
-    local fields = {
-        { name = "Revenant", value = tostring(m and m.Name or "Unknown"), inline = true },
-        { name = "Kill #", value = tostring(RevFarm.kills), inline = true },
-        { name = "Position", value = ("%d, %d, %d"):format(pos.X, pos.Y, pos.Z), inline = true },
-        { name = "Server", value = game.JobId ~= "" and game.JobId:sub(1, 20) or "Studio", inline = true },
-    }
-    for _, f in ipairs(extraFields or {}) do fields[#fields+1] = f end
-    task.spawn(sendWebhook, title, fields, color or 0xCD323C)
-end
+local reportRevDeath, dropRevenant, reportRevEvent, clearRev, considerHumanoid, rescanRevenants, sortedRevenants
 
-local function reportRevDeath(m)
-    if revDeathSent[m] then return end
-    revDeathSent[m] = true
-    RevFarm.kills += 1
-    reportRevEvent("Revenant Killed", m, {
-        { name = "Farming", value = flags.RevFarm and ("ON — Tool: " .. tostring(RevFarm.tool)) or "OFF", inline = true },
-        { name = "Session Kills", value = tostring(RevFarm.kills) },
-    }, 0xCD323C)
-end
-
-local function clearRev(m)
-    local e = revESP[m]
-    if e then
-        if e.bb then e.bb:Destroy() end
-        if e.hl then e.hl:Destroy() end
-        revESP[m] = nil
+do
+    local function _reportRevEvent(title, m, extraFields, color)
+        if not flags.WebhookRev then return end
+        local part = partOf(m)
+        local pos = part and part.Position or Vector3.zero
+        local fields = {
+            { name = "Revenant", value = tostring(m and m.Name or "Unknown"), inline = true },
+            { name = "Kill #", value = tostring(RevFarm.kills), inline = true },
+            { name = "Position", value = ("%d, %d, %d"):format(pos.X, pos.Y, pos.Z), inline = true },
+            { name = "Server", value = game.JobId ~= "" and game.JobId:sub(1, 20) or "Studio", inline = true },
+        }
+        for _, f in ipairs(extraFields or {}) do fields[#fields + 1] = f end
+        task.spawn(sendWebhook, title, fields, color or 0xCD323C)
     end
-end
+    reportRevEvent = _reportRevEvent
 
-local function dropRevenant(m)
-    local h = revHum[m]
-    if h and h.Health <= 0 then reportRevDeath(m) end
-    revenants[m] = nil
-    revHum[m] = nil
-    local c = revDiedConn[m]
-    if c then c:Disconnect() revDiedConn[m] = nil end
-    clearRev(m)
-end
+    local function _reportRevDeath(m)
+        if revDeathSent[m] then return end
+        revDeathSent[m] = true
+        RevFarm.kills += 1
+        notify(("Revenant killed (#%d)"):format(RevFarm.kills), "farm")
+        _reportRevEvent("Revenant Killed", m, {
+            { name = "Farming", value = flags.RevFarm and ("ON — Tool: " .. tostring(RevFarm.tool)) or "OFF", inline = true },
+            { name = "Session Kills", value = tostring(RevFarm.kills) },
+        }, 0xCD323C)
+    end
+    reportRevDeath = _reportRevDeath
 
-local function considerHumanoid(h)
-    task.defer(function()
-        local m = h.Parent
-        if m and not revenants[m] and isRevenant(m) then
-            revenants[m] = true
-            revHum[m] = h
-            revDiedConn[m] = h.Died:Connect(function() reportRevDeath(m) end)
+    local function _clearRev(m)
+        local e = revESP[m]
+        if e then
+            if e.bb then e.bb:Destroy() end
+            if e.hl then e.hl:Destroy() end
+            revESP[m] = nil
         end
-    end)
+    end
+    clearRev = _clearRev
+
+    local function _dropRevenant(m)
+        local h = revHum[m]
+        if h and h.Health <= 0 then _reportRevDeath(m) end
+        revenants[m] = nil
+        revHum[m] = nil
+        local c = revDiedConn[m]
+        if c then c:Disconnect() revDiedConn[m] = nil end
+        _clearRev(m)
+    end
+    dropRevenant = _dropRevenant
+
+    local function _considerHumanoid(h)
+        task.defer(function()
+            local m = h.Parent
+            if m and not revenants[m] and isRevenant(m) then
+                revenants[m] = true
+                revHum[m] = h
+                revDiedConn[m] = h.Died:Connect(function() _reportRevDeath(m) end)
+            end
+        end)
+    end
+    considerHumanoid = _considerHumanoid
+
+    local function _rescanRevenants()
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("Humanoid") then _considerHumanoid(d) end
+        end
+    end
+    rescanRevenants = _rescanRevenants
+
+    local function _sortedRevenants(aliveOnly)
+        local arr = {}
+        for m in pairs(revenants) do
+            if m:IsDescendantOf(workspace) then
+                local hum = m:FindFirstChildOfClass("Humanoid")
+                if not aliveOnly or (hum and hum.Health > 0) then arr[#arr + 1] = m end
+            end
+        end
+        local hrp = getHRP()
+        if hrp then
+            table.sort(arr, function(a, b)
+                local pa, pb = partOf(a), partOf(b)
+                if not pa or not pb then return pa ~= nil end
+                return (pa.Position - hrp.Position).Magnitude < (pb.Position - hrp.Position).Magnitude
+            end)
+        end
+        return arr
+    end
+    sortedRevenants = _sortedRevenants
 end
 
-local function rescanRevenants()
-    for _, d in ipairs(workspace:GetDescendants()) do
-        if d:IsA("Humanoid") then considerHumanoid(d) end
-    end
-end
 rescanRevenants()
 track(workspace.DescendantAdded:Connect(function(d) if d:IsA("Humanoid") then considerHumanoid(d) end end))
 track(workspace.DescendantRemoving:Connect(function(d)
     if d:IsA("Humanoid") and d.Parent and revenants[d.Parent] then dropRevenant(d.Parent) end
 end))
-
-local function sortedRevenants(aliveOnly)
-    local arr = {}
-    for m in pairs(revenants) do
-        if m:IsDescendantOf(workspace) then
-            local hum = m:FindFirstChildOfClass("Humanoid")
-            if not aliveOnly or (hum and hum.Health > 0) then arr[#arr + 1] = m end
-        end
-    end
-    local hrp = getHRP()
-    if hrp then
-        table.sort(arr, function(a, b)
-            local pa, pb = partOf(a), partOf(b)
-            if not pa or not pb then return pa ~= nil end
-            return (pa.Position - hrp.Position).Magnitude < (pb.Position - hrp.Position).Magnitude
-        end)
-    end
-    return arr
-end
-
-addSection(npcPage, "Revenant ESP")
-addToggle(npcPage, "Track (billboard + studs)", false, function(v) flags.Track = v end)
-addToggle(npcPage, "Highlight (always on top)", false, function(v) flags.Highlight = v end)
-
-addSection(npcPage, "Stats")
-local targetBtn = addButton(npcPage, "Target: nearest (click to cycle)", function()
-    local arr = sortedRevenants()
-    cycleIdx = (cycleIdx + 1) % (#arr + 1)
-    selectedModel = (cycleIdx > 0) and arr[cycleIdx] or nil
-end)
-addButton(npcPage, "Teleport to revenant", function()
-    local arr = sortedRevenants()
-    local target = selectedModel or arr[1]
-    local part = partOf(target)
-    if part then
-        teleportTo(part.CFrame)
-        notify("Teleported to revenant: " .. (target and target.Name or "?"), T.blue)
-    else
-        notify("No revenant found to teleport to", T.accent)
-    end
-end)
 
 local function fireSignal(signal, fallback)
     local fired = false
@@ -890,190 +1020,153 @@ local function fireSignal(signal, fallback)
     if not fired then pcall(fallback) end
 end
 
-addSection(npcPage, "Auto Attack (normal swings only)")
-local autoRange = CONFIG.AutoAttackRange
-local autoStatus, autoSlider
+do -- NPC UI block
+    addSection(npcPage, "Revenant ESP")
+    addToggle(npcPage, "Track (billboard + studs)", false, function(v) flags.Track = v end)
+    addToggle(npcPage, "Highlight (always on top)", false, function(v) flags.Highlight = v end)
 
-addToggle(npcPage, "Auto Attack near revenant", false, function(v)
-    flags.AutoAttack = v
-    if not v then
-        local ch = LP.Character
-        local tool = ch and ch:FindFirstChildOfClass("Tool")
-        if tool then fireSignal(tool.Deactivated, function() tool:Deactivate() end) end
-        if autoStatus then autoStatus.Text = "Idle" end
-    end
-end)
-addToggle(npcPage, "Face revenant while attacking", false, function(v) flags.AutoFace = v end)
-autoSlider = addSlider(npcPage, "Range", 5, 40, autoRange, function(v)
-    autoRange = v
-    autoSlider.Label.Text = ("Range: %d studs"):format(v)
-end)
-autoSlider.Label.Text = ("Range: %d studs"):format(autoRange)
-autoStatus = addLabel(npcPage, "Idle")
+    addSection(npcPage, "Stats")
+    local targetBtn = addButton(npcPage, "Target: nearest (click to cycle)", function()
+        local arr = sortedRevenants()
+        cycleIdx = (cycleIdx + 1) % (#arr + 1)
+        selectedModel = (cycleIdx > 0) and arr[cycleIdx] or nil
+    end)
+    addButton(npcPage, "Teleport to revenant", function()
+        local arr = sortedRevenants()
+        local target = selectedModel or arr[1]
+        local part = partOf(target)
+        if part then
+            teleportTo(part.CFrame)
+            notify("Teleported to revenant: " .. esc(target and target.Name or "?"), "info")
+        else
+            notify("No revenant found to teleport to", "error")
+        end
+    end)
 
-task.spawn(function()
-    while alive do
-        if flags.AutoAttack and not flags.RevFarm then
-            local hrp = getHRP()
+    addSection(npcPage, "Auto Attack (normal swings only)")
+    local autoRange = CONFIG.AutoAttackRange
+    local autoStatus, autoSlider
+
+    addToggle(npcPage, "Auto Attack near revenant", false, function(v)
+        flags.AutoAttack = v
+        if not v then
             local ch = LP.Character
             local tool = ch and ch:FindFirstChildOfClass("Tool")
-            local tp = partOf(sortedRevenants(true)[1])
-            if not hrp or not tool then
-                autoStatus.Text = "No weapon equipped"
-            elseif not tp then
-                autoStatus.Text = "No revenant found"
-            else
-                local dist = math.floor((tp.Position - hrp.Position).Magnitude)
-                if dist <= autoRange then
-                    if flags.AutoFace then
-                        hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(tp.Position.X, hrp.Position.Y, tp.Position.Z))
-                    end
-                    fireSignal(tool.Activated, function() tool:Activate() end)
-                    task.wait(0.05)
-                    fireSignal(tool.Deactivated, function() tool:Deactivate() end)
-                    autoStatus.Text = ("Attacking (%d studs)"):format(dist)
+            if tool then fireSignal(tool.Deactivated, function() tool:Deactivate() end) end
+            if autoStatus then autoStatus.Text = "Idle" end
+        end
+    end)
+    addToggle(npcPage, "Face revenant while attacking", false, function(v) flags.AutoFace = v end)
+    autoSlider = addSlider(npcPage, "Range", 5, 40, autoRange, function(v)
+        autoRange = v
+        autoSlider.Label.Text = ("Range: %d studs"):format(v)
+    end, { save = "Auto attack range" })
+    autoSlider.Label.Text = ("Range: %d studs"):format(autoRange)
+    autoStatus = addLabel(npcPage, "Idle")
+
+    task.spawn(function()
+        while alive do
+            if flags.AutoAttack and not flags.RevFarm then
+                local hrp = getHRP()
+                local ch = LP.Character
+                local tool = ch and ch:FindFirstChildOfClass("Tool")
+                local tp = partOf(sortedRevenants(true)[1])
+                if not hrp or not tool then
+                    autoStatus.Text = "No weapon equipped"
+                elseif not tp then
+                    autoStatus.Text = "No revenant found"
                 else
-                    autoStatus.Text = ("Revenant out of range (%d studs)"):format(dist)
+                    local dist = math.floor((tp.Position - hrp.Position).Magnitude)
+                    if dist <= autoRange then
+                        if flags.AutoFace then
+                            hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(tp.Position.X, hrp.Position.Y, tp.Position.Z))
+                        end
+                        fireSignal(tool.Activated, function() tool:Activate() end)
+                        task.wait(0.05)
+                        fireSignal(tool.Deactivated, function() tool:Deactivate() end)
+                        autoStatus.Text = ("Attacking (%d studs)"):format(dist)
+                    else
+                        autoStatus.Text = ("Revenant out of range (%d studs)"):format(dist)
+                    end
                 end
-            end
-            task.wait(CONFIG.AutoAttackInterval)
-        else
-            task.wait(0.3)
-        end
-    end
-end)
-
-addSection(npcPage, "Model Attributes")
-local modelAttrLabel = addLabel(npcPage, "...")
-addSection(npcPage, "Humanoid Attributes")
-local humAttrLabel = addLabel(npcPage, "...")
-
-task.spawn(function()
-    local tick5 = 0
-    while alive do
-        local hrp = getHRP()
-        for m in pairs(revenants) do
-            if not m:IsDescendantOf(workspace) then
-                dropRevenant(m)
+                task.wait(CONFIG.AutoAttackInterval)
             else
-                local e = revESP[m]
-                if not e then e = {} revESP[m] = e end
-                local part = partOf(m)
+                task.wait(0.3)
+            end
+        end
+    end)
 
-                if flags.Track and part then
-                    if not e.bb then
-                        e.bb = new("BillboardGui", {
-                            Name = "RevenantTrack", AlwaysOnTop = true, Size = UDim2.fromOffset(140, 36),
-                            StudsOffset = Vector3.new(0, 3, 0), MaxDistance = math.huge, ResetOnSpawn = false, Parent = espFolder,
-                        })
-                        e.lbl = new("TextLabel", {
-                            Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(255, 30, 30),
-                            TextStrokeTransparency = 0, Font = Enum.Font.GothamBold, TextSize = 14, Parent = e.bb,
-                        })
+    addSection(npcPage, "Model Attributes")
+    local modelAttrLabel = addLabel(npcPage, "...")
+    addSection(npcPage, "Humanoid Attributes")
+    local humAttrLabel = addLabel(npcPage, "...")
+
+    task.spawn(function()
+        local tick5 = 0
+        while alive do
+            local hrp = getHRP()
+            for m in pairs(revenants) do
+                if not m:IsDescendantOf(workspace) then
+                    dropRevenant(m)
+                else
+                    local e = revESP[m]
+                    if not e then e = {} revESP[m] = e end
+                    local part = partOf(m)
+
+                    if flags.Track and part then
+                        if not e.bb then
+                            e.bb = new("BillboardGui", {
+                                Name = "RevenantTrack", AlwaysOnTop = true, Size = UDim2.fromOffset(140, 36),
+                                StudsOffset = Vector3.new(0, 3, 0), MaxDistance = math.huge, ResetOnSpawn = false, Parent = espFolder,
+                            })
+                            e.lbl = new("TextLabel", {
+                                Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(255, 30, 30),
+                                TextStrokeTransparency = 0, Font = Enum.Font.GothamBold, TextSize = 14, Parent = e.bb,
+                            })
+                        end
+                        e.bb.Adornee = part
+                        local dist = hrp and math.floor((part.Position - hrp.Position).Magnitude) or 0
+                        e.lbl.Text = ("REVENANT\n%d studs"):format(dist)
+                    elseif e.bb then
+                        e.bb:Destroy() e.bb, e.lbl = nil, nil
                     end
-                    e.bb.Adornee = part
-                    local dist = hrp and math.floor((part.Position - hrp.Position).Magnitude) or 0
-                    e.lbl.Text = ("REVENANT\n%d studs"):format(dist)
-                elseif e.bb then
-                    e.bb:Destroy() e.bb, e.lbl = nil, nil
-                end
 
-                if flags.Highlight then
-                    if not e.hl then
-                        e.hl = new("Highlight", {
-                            Name = "RevenantHL", DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
-                            FillColor = Color3.fromRGB(255, 30, 30), FillTransparency = 0.6,
-                            OutlineColor = Color3.fromRGB(255, 255, 255), Parent = espFolder,
-                        })
+                    if flags.Highlight then
+                        if not e.hl then
+                            e.hl = new("Highlight", {
+                                Name = "RevenantHL", DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+                                FillColor = Color3.fromRGB(255, 30, 30), FillTransparency = 0.6,
+                                OutlineColor = Color3.fromRGB(255, 255, 255), Parent = espFolder,
+                            })
+                        end
+                        e.hl.Adornee = m
+                    elseif e.hl then
+                        e.hl:Destroy() e.hl = nil
                     end
-                    e.hl.Adornee = m
-                elseif e.hl then
-                    e.hl:Destroy() e.hl = nil
                 end
             end
-        end
 
-        local arr = sortedRevenants()
-        if selectedModel and not selectedModel:IsDescendantOf(workspace) then selectedModel, cycleIdx = nil, 0 end
-        local target = selectedModel or arr[1]
-        if target then
-            local idx = table.find(arr, target) or 1
-            targetBtn.Text = ("Target: %s (%d/%d)%s - click to cycle"):format(target.Name, idx, #arr, selectedModel and "" or " [nearest]")
-            modelAttrLabel.Text = attrText(target)
-            local hum = target:FindFirstChildOfClass("Humanoid")
-            humAttrLabel.Text = hum and attrText(hum) or '<font color="#888888">(no humanoid)</font>'
-        else
-            targetBtn.Text = "Target: none found"
-            modelAttrLabel.Text = '<font color="#888888">No revenant found</font>'
-            humAttrLabel.Text = '<font color="#888888">No revenant found</font>'
-        end
-
-        tick5 += 0.25
-        if tick5 >= 5 then tick5 = 0 rescanRevenants() end
-        task.wait(0.25)
-    end
-end)
-
-----------------------------------------------------------------------
--- SHARED
-----------------------------------------------------------------------
-local Shared = {
-    farmBusy = false,
-}
-Shared.autoSell = function() end
-
-----------------------------------------------------------------------
--- SCRAP COUNTER
-----------------------------------------------------------------------
-local Cap = { enabled = true, max = CONFIG.ScrapMaxDefault, inst = nil, get = nil, desc = nil, nextScan = 0 }
-
-local function isScrapName(n)
-    return n:lower():find(CONFIG.ScrapCounterMatch, 1, true) ~= nil
-end
-
-local function readCounter(inst)
-    if inst:IsA("ValueBase") then
-        local v = inst.Value
-        return type(v) == "number" and v or nil
-    end
-    if inst:IsA("Folder") or inst:IsA("Configuration") then
-        return #inst:GetChildren()
-    end
-    return nil
-end
-
-local function findScrapCounter()
-    local cd = game:GetService("ReplicatedStorage"):FindFirstChild("CharacterData")
-    local mine = cd and cd:FindFirstChild(LP.Name)
-    local pg = LP:FindFirstChild("PlayerGui")
-    local roots = { LP:FindFirstChild("leaderstats"), mine and mine:FindFirstChild("PlayerStuff"), mine, LP }
-    for _, root in ipairs(roots) do
-        if root then
-            for k, v in pairs(root:GetAttributes()) do
-                if isScrapName(k) and type(v) == "number" then
-                    return root, function() return root:GetAttribute(k) end, root:GetFullName() .. " @" .. k
-                end
+            local arr = sortedRevenants()
+            if selectedModel and not selectedModel:IsDescendantOf(workspace) then selectedModel, cycleIdx = nil, 0 end
+            local target = selectedModel or arr[1]
+            if target then
+                local idx = table.find(arr, target) or 1
+                targetBtn.Text = ("Target: %s (%d/%d)%s - click to cycle"):format(target.Name, idx, #arr, selectedModel and "" or " [nearest]")
+                modelAttrLabel.Text = attrText(target)
+                local hum = target:FindFirstChildOfClass("Humanoid")
+                humAttrLabel.Text = hum and attrText(hum) or '<font color="#888888">(no humanoid)</font>'
+            else
+                targetBtn.Text = "Target: none found"
+                modelAttrLabel.Text = '<font color="#888888">No revenant found</font>'
+                humAttrLabel.Text = '<font color="#888888">No revenant found</font>'
             end
-            for _, d in ipairs(root:GetDescendants()) do
-                if isScrapName(d.Name) and readCounter(d) ~= nil and not (pg and d:IsDescendantOf(pg)) then
-                    return d, function() return readCounter(d) end, d:GetFullName()
-                end
-            end
-        end
-    end
-    return nil
-end
 
-local function getScrapCount()
-    if not (Cap.inst and Cap.inst:IsDescendantOf(game)) then
-        if tick() < Cap.nextScan then return nil end
-        Cap.nextScan = tick() + 2
-        Cap.inst, Cap.get, Cap.desc = findScrapCounter()
-        if not Cap.inst then return nil end
-    end
-    local ok, v = pcall(Cap.get)
-    return ok and tonumber(v) or nil
-end
+            tick5 += 0.25
+            if tick5 >= 5 then tick5 = 0 rescanRevenants() end
+            task.wait(0.25)
+        end
+    end)
+end -- end NPC UI block
 
 ----------------------------------------------------------------------
 -- FARMING PAGE
@@ -1081,136 +1174,194 @@ end
 local farmPage = addTab("Farming", false)
 local farmSubs = addSubTabs(farmPage, { "Scrap Farming", "Auto Farm Revenant" }, 140)
 local scrapPage = farmSubs["Scrap Farming"]
-local revPage = farmSubs["Auto Farm Revenant"]
+local revPage   = farmSubs["Auto Farm Revenant"]
 
-local scrapEnabled = {}
-for _, name in ipairs(CONFIG.FarmTypes) do scrapEnabled[name] = true end
-local scrapColors = { Golden = Color3.fromRGB(248, 186, 0), Cursed = Color3.fromRGB(255, 0, 0) }
-local scrapCooldown = {}
-local scrapESP = {}
-local promptHoldOverrides = {}   -- [prompt] = originalHoldDuration
+-- scrap farming helpers declared at outer scope so farming loop can reach them
+local restorePromptHolds, getGolden, spamPrompt
 
-local function restorePromptHolds()
-    for p, orig in pairs(promptHoldOverrides) do
-        if p and p.Parent then
-            pcall(function() p.HoldDuration = orig end)
+do -- scrap farming block
+    local scrapColors = { Golden = Color3.fromRGB(248, 186, 0), Cursed = Color3.fromRGB(255, 0, 0) }
+    local scrapCooldown = {}
+    local scrapESP = {}
+    local promptHoldOverrides = {}
+    local promptCache = setmetatable({}, { __mode = "k" })
+    local spamDelayMs = 40
+
+    local function _restorePromptHolds()
+        for p, orig in pairs(promptHoldOverrides) do
+            if p and p.Parent then pcall(function() p.HoldDuration = orig end) end
+        end
+        table.clear(promptHoldOverrides)
+    end
+    restorePromptHolds = _restorePromptHolds
+
+    local function zeroPromptHold(prompt)
+        if not prompt or not prompt.Parent then return end
+        if promptHoldOverrides[prompt] == nil then promptHoldOverrides[prompt] = prompt.HoldDuration end
+        if prompt.HoldDuration ~= CONFIG.ScrapHoldOverride then
+            pcall(function() prompt.HoldDuration = CONFIG.ScrapHoldOverride end)
         end
     end
-    table.clear(promptHoldOverrides)
-end
 
-local function zeroPromptHold(prompt)
-    if not prompt or not prompt.Parent then return end
-    if promptHoldOverrides[prompt] == nil then
-        promptHoldOverrides[prompt] = prompt.HoldDuration
+    local function scrapTypeOf(inst)
+        local t = inst:GetAttribute(CONFIG.ScrapAttribute)
+        if type(t) ~= "string" then return nil end
+        for _, name in ipairs(CONFIG.ScrapTypes) do
+            if t:lower() == name:lower() then return name end
+        end
+        return nil
     end
-    pcall(function() prompt.HoldDuration = CONFIG.ScrapHoldOverride end)
-end
 
-local function scrapTypeOf(inst)
-    local t = inst:GetAttribute(CONFIG.ScrapAttribute)
-    if type(t) ~= "string" then return nil end
-    for _, name in ipairs(CONFIG.ScrapTypes) do
-        if t:lower() == name:lower() then return name end
+    local function scrapsRoot()
+        local map = workspace:FindFirstChild("MAP")
+        return (map and map:FindFirstChild("Scraps")) or workspace
     end
-    return nil
-end
 
-local function scrapsRoot()
-    local map = workspace:FindFirstChild("MAP")
-    return (map and map:FindFirstChild("Scraps")) or workspace
-end
+    local function scrapPromptFor(inst, root)
+        local own = inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if own then return own end
+        local myType = scrapTypeOf(inst)
+        local cur = inst.Parent
+        for _ = 1, 4 do
+            if not cur or cur == workspace or cur == root then break end
+            local mixed = false
+            for _, d in ipairs(cur:GetDescendants()) do
+                if d ~= inst and d:IsA("BasePart") then
+                    local t = scrapTypeOf(d)
+                    if t and t ~= myType then mixed = true break end
+                end
+            end
+            if mixed then break end
+            local pp = cur:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if pp then return pp end
+            cur = cur.Parent
+        end
+        return nil
+    end
 
-local function scanScraps()
-    local root = scrapsRoot()
-    local out, seenPrompt = {}, {}
-    for _, d in ipairs(root:GetDescendants()) do
-        if d:IsA("BasePart") then
-            local t = scrapTypeOf(d)
-            if t then
-                local prompt = findPrompt(d, root)
-                if not prompt or not seenPrompt[prompt] then
-                    if prompt then seenPrompt[prompt] = true end
-                    out[#out + 1] = { inst = d, type = t, prompt = prompt }
+    local function promptFor(inst, root)
+        local c = promptCache[inst]
+        if c and c.Parent then return c end
+        local p = scrapPromptFor(inst, root)
+        promptCache[inst] = p
+        return p
+    end
+
+    local function looksGolden(c)
+        if typeof(c) ~= "Color3" then return false end
+        local h, s, v = c:ToHSV()
+        return h >= 0.09 and h <= 0.17 and s >= 0.55 and v >= 0.5
+    end
+
+    local function partIsGolden(part)
+        if looksGolden(part.Color) then return true end
+        for _, d in ipairs(part:GetDescendants()) do
+            if d:IsA("BasePart") then
+                if looksGolden(d.Color) then return true end
+            elseif d:IsA("Highlight") then
+                if looksGolden(d.FillColor) or looksGolden(d.OutlineColor) then return true end
+            elseif d:IsA("Light") then
+                if looksGolden(d.Color) then return true end
+            end
+        end
+        return false
+    end
+
+    local function scanScraps(goldenOnly)
+        local root = scrapsRoot()
+        local out, seenPrompt, rejected = {}, {}, 0
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("BasePart") then
+                local t = scrapTypeOf(d)
+                if t then
+                    if not goldenOnly then
+                        out[#out + 1] = { inst = d, type = t }
+                    elseif t == "Golden" then
+                        if flags.StrictGold ~= false and not partIsGolden(d) then
+                            rejected += 1
+                        else
+                            local prompt = promptFor(d, root)
+                            if prompt and not seenPrompt[prompt] then
+                                seenPrompt[prompt] = true
+                                out[#out + 1] = { inst = d, type = t, prompt = prompt }
+                            end
+                        end
+                    end
                 end
             end
         end
+        return out, rejected
     end
-    return out
-end
 
-local function scrapAvailable(inst)
-    if not inst:IsDescendantOf(workspace) then return false end
-    return promptAvailable(findPrompt(inst, scrapsRoot()))
-end
-
-addSection(scrapPage, "Scrap Farming (Golden only — instant pickup)")
-local farmStatus
-addToggle(scrapPage, "Scrap Farming", false, function(v)
-    flags.Farm = v
-    if not v then
-        releaseCamera()
-        restorePromptHolds()
-        Shared.farmBusy = false
-        if farmStatus then farmStatus.Text = "Idle" end
+    local goldCache = { t = 0, list = {}, rejected = 0 }
+    local function _getGolden(force)
+        if force or tick() - goldCache.t > 0.3 then
+            goldCache.list, goldCache.rejected = scanScraps(true)
+            goldCache.t = tick()
+        end
+        return goldCache.list
     end
-end)
+    getGolden = _getGolden
 
-addSection(scrapPage, "Scrap Limit")
-addToggle(scrapPage, "Limit scraps (go to shop when full)", true, function(v) Cap.enabled = v end)
-local capSlider
-capSlider = addSlider(scrapPage, "Max scraps", 1, CONFIG.ScrapMaxLimit, Cap.max, function(v)
-    Cap.max = v
-    capSlider.Label.Text = ("Max scraps: %d"):format(v)
-end)
-capSlider.Label.Text = ("Max scraps: %d"):format(Cap.max)
-local capStatus = addLabel(scrapPage, "Counter: searching...")
-addButton(scrapPage, "Rescan scrap counter", function()
-    Cap.inst, Cap.nextScan = nil, 0
-    local n = getScrapCount()
-    capStatus.Text = n and ("Found: %s = %d"):format(tostring(Cap.desc), n) or "Scrap counter not found"
-    notify("Scrap counter: " .. (Cap.desc or "not found"), T.blue)
-end)
+    local function scrapAvailable(inst, prompt)
+        if not inst:IsDescendantOf(workspace) then return false end
+        return promptAvailable(prompt or promptFor(inst, scrapsRoot()))
+    end
 
-addSection(scrapPage, "ESP")
-addToggle(scrapPage, "Scrap ESP (Golden / Cursed)", false, function(v) flags.ScrapESP = v end)
-addSection(scrapPage, "Status")
-farmStatus = addLabel(scrapPage, "Idle")
+    local function _spamPrompt(prompt, inst, cf, maxTime)
+        local t0 = tick()
+        while flags.Farm and tick() - t0 < maxTime do
+            if not scrapAvailable(inst, prompt) then return true end
+            local h = getHRP()
+            if h and (h.Position - cf.Position).Magnitude > 6 then teleportTo(cf) end
+            zeroPromptHold(prompt)
+            pcall(firePrompt, prompt)
+            task.wait(spamDelayMs / 1000)
+        end
+        return not scrapAvailable(inst, prompt)
+    end
+    spamPrompt = _spamPrompt
 
-task.spawn(function()
-    local fullHandled = false
-    while alive do
-        if flags.Farm then
-            local hrp = getHRP()
-            if not hrp then
-                farmStatus.Text = "Waiting for character..."
-                task.wait(0.5)
-            else
-                local count = getScrapCount()
-                if count then
-                    capStatus.Text = ("Scraps: %d / %d\nSource: %s"):format(count, Cap.max, tostring(Cap.desc))
-                else
-                    capStatus.Text = "Scrap counter not found (limit inactive)"
-                end
+    addSection(scrapPage, "Scrap Farming (Golden only — spams pickup)")
+    local farmStatus, scrapStats
+    local farmCollected = 0
+    addToggle(scrapPage, "Scrap Farming", false, function(v)
+        flags.Farm = v
+        if not v then
+            releaseCamera()
+            _restorePromptHolds()
+            if farmStatus then farmStatus.Text = "Idle" end
+        end
+    end)
+    addToggle(scrapPage, "Strict golden color check", true, function(v)
+        flags.StrictGold = v
+        goldCache.t = 0
+    end)
+    local spamSlider
+    spamSlider = addSlider(scrapPage, "Prompt spam delay", 10, 150, spamDelayMs, function(v)
+        spamDelayMs = v
+        spamSlider.Label.Text = ("Prompt spam delay: %d ms"):format(v)
+    end, { save = "Prompt spam delay" })
+    spamSlider.Label.Text = ("Prompt spam delay: %d ms"):format(spamDelayMs)
 
-                if Cap.enabled and count and count >= Cap.max then
-                    if not fullHandled then
-                        fullHandled = true
-                        farmStatus.Text = "Scrap limit reached, going to shop..."
-                        notify("Scrap limit reached — heading to shop", T.on)
-                        local sp = partOf(workspace:FindFirstChild(CONFIG.ShopPos1Name, true))
-                        if sp then teleportTo(sp.CFrame) end
-                        task.wait(0.3)
-                        pcall(Shared.autoSell)
-                    end
-                    farmStatus.Text = ("Full (%d/%d) — at shop, waiting for sell..."):format(count, Cap.max)
+    addSection(scrapPage, "ESP")
+    addToggle(scrapPage, "Scrap ESP (Golden / Cursed)", false, function(v) flags.ScrapESP = v end)
+    addSection(scrapPage, "Status")
+    farmStatus = addLabel(scrapPage, "Idle")
+    scrapStats = addLabel(scrapPage, "Golden found: -")
+
+    task.spawn(function()
+        while alive do
+            if flags.Farm then
+                local hrp = getHRP()
+                if not hrp then
+                    farmStatus.Text = "Waiting for character..."
                     task.wait(0.5)
                 else
-                    fullHandled = false
-
                     local best, bestDist
-                    for _, s in ipairs(scanScraps()) do
-                        if s.type == "Golden" and scrapEnabled[s.type] and scrapAvailable(s.inst) and (scrapCooldown[s.inst] or 0) < tick() then
+                    local list = _getGolden()
+                    for _, s in ipairs(list) do
+                        if (scrapCooldown[s.inst] or 0) < tick() and scrapAvailable(s.inst, s.prompt) then
                             local p = partOf(s.inst)
                             if p then
                                 local d = (p.Position - hrp.Position).Magnitude
@@ -1218,57 +1369,33 @@ task.spawn(function()
                             end
                         end
                     end
+                    scrapStats.Text = ("Golden found: %d | skipped (not gold): %d | collected: %d"):format(#list, goldCache.rejected, farmCollected)
 
                     if best then
-                        local inst = best.inst
-                        local prompt = best.prompt or findPrompt(inst, scrapsRoot())
+                        local inst, prompt = best.inst, best.prompt
                         local cf = promptCFrame(prompt, inst)
-                        if cf and prompt then
+                        if cf then
                             local scrapPart = partOf(inst)
                             local lookAt = scrapPart and scrapPart.Position or cf.Position
 
-                            -- Zero out hold duration for instant pickup
-                            zeroPromptHold(prompt)
-
-                            Shared.farmBusy = true
-                            farmStatus.Text = ("Collecting %s..."):format(best.type)
+                            farmStatus.Text = "Collecting Golden (spamming prompt)..."
                             teleportTo(cf)
-                            task.wait(0.12)
+                            task.wait(0.1)
                             aimCamera(lookAt)
 
-                            -- Fire prompt (hold duration is 0 so it's instant)
-                            local ok = pcall(firePrompt, prompt)
-                            if not ok then
-                                pcall(function() prompt:InputHoldBegin() end)
-                                task.wait(0.1)
-                                pcall(function() prompt:InputHoldEnd() end)
-                            end
-
-                            -- Wait briefly to confirm pickup
-                            local t0 = tick()
-                            local pickupConfirmed = false
-                            repeat
-                                task.wait(0.08)
-                                if not scrapAvailable(inst) then
-                                    pickupConfirmed = true
-                                end
-                                -- re-anchor if drifted
-                                local h2 = getHRP()
-                                if h2 and (h2.Position - cf.Position).Magnitude > 8 then
-                                    teleportTo(cf)
-                                end
-                            until pickupConfirmed or tick() - t0 > 3 or not flags.Farm
-
+                            local picked = _spamPrompt(prompt, inst, cf, 3)
                             releaseCamera()
-                            Shared.farmBusy = false
+                            goldCache.t = 0
 
-                            if pickupConfirmed then
-                                farmStatus.Text = ("Collected Golden — waiting for respawn..."):format()
+                            if picked then
+                                farmCollected += 1
+                                farmStatus.Text = "Collected Golden — waiting for respawn..."
+                                notify(("Golden scrap collected (#%d)"):format(farmCollected), "farm")
                                 local pos = cf.Position
                                 sendWebhook("Scrap collected: Golden", {
                                     { name = "Type", value = "Golden", inline = true },
                                     { name = "Position", value = ("%d, %d, %d"):format(pos.X, pos.Y, pos.Z) },
-                                    { name = "Server", value = game.JobId ~= "" and game.JobId:sub(1,20) or "Studio" },
+                                    { name = "Server", value = game.JobId ~= "" and game.JobId:sub(1, 20) or "Studio" },
                                 }, 0xFFC828)
                             else
                                 scrapCooldown[inst] = tick() + CONFIG.ScrapRetryCooldown
@@ -1279,57 +1406,56 @@ task.spawn(function()
                         end
                     else
                         farmStatus.Text = "No golden scrap available, waiting for respawn..."
-                        task.wait(0.5)
+                        task.wait(0.4)
                     end
+                    task.wait(0.03)
                 end
-                task.wait(0.05)
+            else
+                task.wait(0.3)
             end
-        else
-            Shared.farmBusy = false
-            task.wait(0.3)
         end
-    end
-end)
+    end)
 
-task.spawn(function()
-    while alive do
-        if flags.ScrapESP then
-            local seen = {}
-            local hrp = getHRP()
-            for _, s in ipairs(scanScraps()) do
-                local part = partOf(s.inst)
-                if part then
-                    seen[s.inst] = true
-                    local e = scrapESP[s.inst]
-                    if not e then
-                        local bb = new("BillboardGui", {
-                            Name = "ScrapESP", AlwaysOnTop = true, Size = UDim2.fromOffset(120, 30),
-                            StudsOffset = Vector3.new(0, 2, 0), MaxDistance = math.huge, ResetOnSpawn = false, Parent = espFolder,
-                        })
-                        local lbl = new("TextLabel", {
-                            Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, TextColor3 = scrapColors[s.type] or Color3.new(1, 1, 1),
-                            TextStrokeTransparency = 0, Font = Enum.Font.GothamBold, TextSize = 13, Parent = bb,
-                        })
-                        e = { bb = bb, lbl = lbl }
-                        scrapESP[s.inst] = e
+    task.spawn(function()
+        while alive do
+            if flags.ScrapESP then
+                local seen = {}
+                local hrp = getHRP()
+                for _, s in ipairs(scanScraps(false)) do
+                    local part = partOf(s.inst)
+                    if part then
+                        seen[s.inst] = true
+                        local e = scrapESP[s.inst]
+                        if not e then
+                            local bb = new("BillboardGui", {
+                                Name = "ScrapESP", AlwaysOnTop = true, Size = UDim2.fromOffset(120, 30),
+                                StudsOffset = Vector3.new(0, 2, 0), MaxDistance = math.huge, ResetOnSpawn = false, Parent = espFolder,
+                            })
+                            local lbl = new("TextLabel", {
+                                Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, TextColor3 = scrapColors[s.type] or Color3.new(1, 1, 1),
+                                TextStrokeTransparency = 0, Font = Enum.Font.GothamBold, TextSize = 13, Parent = bb,
+                            })
+                            e = { bb = bb, lbl = lbl }
+                            scrapESP[s.inst] = e
+                        end
+                        e.bb.Adornee = part
+                        local dist = hrp and math.floor((part.Position - hrp.Position).Magnitude) or 0
+                        e.lbl.Text = ("%s\n%d studs"):format(s.type, dist)
                     end
-                    e.bb.Adornee = part
-                    local dist = hrp and math.floor((part.Position - hrp.Position).Magnitude) or 0
-                    e.lbl.Text = ("%s\n%d studs"):format(s.type, dist)
                 end
+                for inst, e in pairs(scrapESP) do
+                    if not seen[inst] then e.bb:Destroy() scrapESP[inst] = nil end
+                end
+            else
+                for inst, e in pairs(scrapESP) do e.bb:Destroy() scrapESP[inst] = nil end
             end
-            for inst, e in pairs(scrapESP) do
-                if not seen[inst] then e.bb:Destroy() scrapESP[inst] = nil end
-            end
-        else
-            for inst, e in pairs(scrapESP) do e.bb:Destroy() scrapESP[inst] = nil end
+            task.wait(1)
         end
-        task.wait(1)
-    end
-end)
+    end)
+end -- end scrap farming block
 
 ----------------------------------------------------------------------
--- AUTO FARM REVENANT  (improved resilience)
+-- AUTO FARM REVENANT
 ----------------------------------------------------------------------
 do
     local function normName(s) return (tostring(s):lower():gsub("[^%w]", "")) end
@@ -1370,7 +1496,6 @@ do
     end
 
     local function stopAnimations()
-        -- Stop all animation tracks on the humanoid/animator to suppress attack anims
         local ch = LP.Character
         if not ch then return end
         local hum = ch:FindFirstChildOfClass("Humanoid")
@@ -1379,18 +1504,13 @@ do
         if animator then
             local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
             if ok and tracks then
-                for _, track in ipairs(tracks) do
-                    pcall(function() track:Stop(0) end)
-                end
+                for _, tr in ipairs(tracks) do pcall(function() tr:Stop(0) end) end
             end
         end
     end
 
     local function releaseRevCamera()
-        if RevFarm.camHeld then
-            RevFarm.camHeld = false
-            releaseCamera()
-        end
+        if RevFarm.camHeld then RevFarm.camHeld = false releaseCamera() end
     end
 
     addSection(revPage, "Auto Farm Revenant")
@@ -1405,7 +1525,7 @@ do
             reportRevEvent("Farm Stopped", nil, {{ name = "Session Kills", value = tostring(RevFarm.kills) }}, 0x888888)
         else
             RevFarm.kills = 0
-            notify("Auto Farm Revenant started — tool: " .. RevFarm.tool, T.on)
+            notify("Auto Farm Revenant started — tool: " .. esc(RevFarm.tool), "farm")
             reportRevEvent("Farm Started", nil, {{ name = "Tool", value = RevFarm.tool, inline = true }}, 0x46C86E)
         end
     end)
@@ -1434,9 +1554,7 @@ do
 
     local function addToolRow(name, rec, custom)
         local n = normName(name)
-        for _, r in ipairs(RevFarm.rows) do
-            if r.norm == n then return r end
-        end
+        for _, r in ipairs(RevFarm.rows) do if r.norm == n then return r end end
         local btn = new("TextButton", {
             Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = T.row, Text = "", AutoButtonColor = false,
             LayoutOrder = #RevFarm.rows + 1, Parent = toolHolder,
@@ -1447,11 +1565,12 @@ do
             TextTruncate = Enum.TextTruncate.AtEnd, Parent = btn,
         })
         if rec then
-            new("TextLabel", {
+            local tag = new("TextLabel", {
                 AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(96, 16),
                 BackgroundColor3 = T.on, Text = "RECOMMENDED", TextColor3 = Color3.new(1, 1, 1),
                 Font = Enum.Font.GothamBold, TextSize = 10, Parent = btn,
             }, { corner(4) })
+            tag:SetAttribute("NoTheme", true)
         elseif custom then
             new("TextLabel", {
                 AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(60, 16),
@@ -1461,10 +1580,11 @@ do
         end
         local row = { name = name, norm = n, btn = btn }
         RevFarm.rows[#RevFarm.rows + 1] = row
-        if custom then RevFarm.custom[n] = true end
+        if custom then RevFarm.custom[n] = true RevFarm.customList[#RevFarm.customList + 1] = name end
         track(btn.Activated:Connect(function() selectTool(name) end))
         return row
     end
+    RevFarm.addToolRow, RevFarm.selectTool = addToolRow, selectTool
 
     for _, t in ipairs(CONFIG.RevenantTools) do addToolRow(t.name, t.rec, false) end
     selectTool(RevFarm.tool)
@@ -1476,16 +1596,20 @@ do
         if not name or name == "" then return end
         addToolRow(name, false, true)
         selectTool(name)
-        notify("Custom tool added: " .. name, T.blue)
+        notify("Custom tool added: " .. esc(name), "info")
     end)
 
     addSection(revPage, "Aim")
     addToggle(revPage, "Aim at head (headshot multiplier)", true, function(v) RevFarm.head = v end)
     local bodyBtn
+    RevFarm.setBody = function(b)
+        if b ~= "Torso" and b ~= "HumanoidRootPart" then return end
+        RevFarm.body = b
+        bodyBtn.Text = ("Body target (head aim off): %s"):format(b)
+    end
     bodyBtn = addButton(revPage, "Body target (head aim off): Torso", function()
-        RevFarm.body = (RevFarm.body == "Torso") and "HumanoidRootPart" or "Torso"
-        bodyBtn.Text = ("Body target (head aim off): %s"):format(RevFarm.body)
-        notify("Body target: " .. RevFarm.body, T.blue)
+        RevFarm.setBody(RevFarm.body == "Torso" and "HumanoidRootPart" or "Torso")
+        notify("Body target: " .. RevFarm.body, "info")
     end)
     addToggle(revPage, "Face target + lock camera", true, function(v)
         RevFarm.camAim = v
@@ -1495,16 +1619,15 @@ do
     distSlider = addSlider(revPage, "Distance", 3, 20, RevFarm.dist, function(v)
         RevFarm.dist = v
         distSlider.Label.Text = ("Distance: %d studs"):format(v)
-    end)
+    end, { save = "Revenant farm distance" })
     distSlider.Label.Text = ("Distance: %d studs"):format(RevFarm.dist)
 
     addSection(revPage, "Kill Count")
-    local killBtn = addButton(revPage, "Reset kill counter", function()
+    addButton(revPage, "Reset kill counter", function()
         RevFarm.kills = 0
-        notify("Kill counter reset", T.dim)
+        notify("Kill counter reset", "neutral")
     end)
 
-    -- Position lock heartbeat
     track(RunService.Heartbeat:Connect(function()
         if not flags.RevFarm then return end
         local hrp = getHRP()
@@ -1512,29 +1635,23 @@ do
         if not hrp or not m or not m:IsDescendantOf(workspace) then return end
         local part = revPartFor(m)
         if not part then return end
-
         local tpos = part.Position
         local flat = Vector3.new(hrp.Position.X - tpos.X, 0, hrp.Position.Z - tpos.Z)
         if flat.Magnitude < 0.1 then flat = Vector3.new(0, 0, 1) end
         local p = tpos + flat.Unit * RevFarm.dist
         local pos = Vector3.new(p.X, tpos.Y + CONFIG.RevFarmYOffset, p.Z)
-
         hrp.CFrame = CFrame.lookAt(pos, Vector3.new(tpos.X, pos.Y, tpos.Z))
         hrp.AssemblyLinearVelocity = Vector3.zero
         hrp.AssemblyAngularVelocity = Vector3.zero
     end))
 
-    -- Camera lock render step
     local function camStep()
         if not flags.RevFarm or not RevFarm.camAim then return end
         local cam = workspace.CurrentCamera
         local hrp = getHRP()
         local m = RevFarm.target
         local part = m and m:IsDescendantOf(workspace) and revPartFor(m)
-        if not (cam and hrp and part) then
-            releaseRevCamera()
-            return
-        end
+        if not (cam and hrp and part) then releaseRevCamera() return end
         RevFarm.camHeld = true
         cam.CameraType = Enum.CameraType.Scriptable
         cam.CFrame = CFrame.lookAt(hrp.Position + Vector3.new(0, 1.5, 0), part.Position)
@@ -1542,12 +1659,11 @@ do
     pcall(function() RunService:UnbindFromRenderStep("RevFarmCam") end)
     RunService:BindToRenderStep("RevFarmCam", Enum.RenderPriority.Camera.Value + 10, camStep)
 
-    -- Main farm loop (resilient night-grind version)
     task.spawn(function()
-        local SWING_INTERVAL     = CONFIG.AutoAttackInterval
-        local EQUIP_RETRY_DELAY  = 1.5
-        local STUCK_THRESHOLD    = 8   -- seconds without a valid target before notifying
-        local lastNotifyStuck    = 0
+        local SWING_INTERVAL    = CONFIG.AutoAttackInterval
+        local EQUIP_RETRY_DELAY = 1.5
+        local STUCK_THRESHOLD   = 8
+        local lastNotifyStuck   = 0
 
         while alive do
             if not flags.RevFarm then
@@ -1557,29 +1673,25 @@ do
                 local hum = ch and ch:FindFirstChildOfClass("Humanoid")
                 local hrp = getHRP()
 
-                -- Character not ready
                 if not (hum and hrp and hum.Health > 0) then
                     RevFarm.status.Text = "Waiting for character to respawn..."
                     RevFarm.target = nil
                     task.wait(0.5)
                 else
-                    -- Tool management
                     local tool = findFarmTool()
                     if not tool then
                         RevFarm.status.Text = ('<font color="#ff5a5a">Tool "%s" not found in hand/backpack</font>'):format(esc(RevFarm.tool))
                         task.wait(EQUIP_RETRY_DELAY)
                     elseif tool.Parent ~= ch then
-                        RevFarm.status.Text = "Equipping " .. tool.Name
+                        RevFarm.status.Text = "Equipping " .. esc(tool.Name)
                         local ok = pcall(function() hum:EquipTool(tool) end)
                         if not ok then
-                            -- try unequip current first then re-equip
                             local current = ch:FindFirstChildOfClass("Tool")
                             if current then pcall(function() hum:UnequipTools() end) task.wait(0.1) end
                             pcall(function() hum:EquipTool(tool) end)
                         end
                         task.wait(0.35)
                     else
-                        -- Tool is equipped — find target
                         RevFarm.target = sortedRevenants(true)[1]
                         local m = RevFarm.target
                         local part = revPartFor(m)
@@ -1589,7 +1701,7 @@ do
                             if RevFarm.stuckTimer > STUCK_THRESHOLD then
                                 if tick() - lastNotifyStuck > 30 then
                                     lastNotifyStuck = tick()
-                                    notify("No revenant found — waiting for spawn...", T.dim)
+                                    notify("No revenant found — waiting for spawn...", "warn")
                                     reportRevEvent("Waiting for Revenant Spawn", nil, {
                                         { name = "Session Kills", value = tostring(RevFarm.kills) },
                                     }, 0x888888)
@@ -1600,23 +1712,18 @@ do
                         else
                             RevFarm.stuckTimer = 0
                             local dist = (part.Position - hrp.Position).Magnitude
-
-                            -- Swing if in range (position lock in Heartbeat handles the movement)
                             if dist <= RevFarm.dist + 8 then
                                 fireSignal(tool.Activated, function() tool:Activate() end)
                                 task.wait(0.05)
                                 fireSignal(tool.Deactivated, function() tool:Deactivate() end)
                                 RevFarm.lastSwingAt = tick()
-                                -- suppress attack animations to reduce visual noise / potential detections
                                 stopAnimations()
                             end
-
                             local hum2 = m:FindFirstChildOfClass("Humanoid")
                             local hp = hum2 and math.floor(hum2.Health) or 0
                             local maxHp = hum2 and math.floor(hum2.MaxHealth) or 0
                             RevFarm.status.Text = ("%s → %s | HP %d/%d | %d studs\nTool: %s | kills: %d"):format(
                                 esc(m.Name), esc(part.Name), hp, maxHp, math.floor(dist), esc(tool.Name), RevFarm.kills)
-
                             task.wait(SWING_INTERVAL)
                         end
                     end
@@ -1624,7 +1731,7 @@ do
             end
         end
     end)
-end
+end -- end auto farm revenant block
 
 ----------------------------------------------------------------------
 -- POWER STATION
@@ -1662,825 +1769,970 @@ end
 ----------------------------------------------------------------------
 local tpPage = addTab("Teleport", true)
 
-local function targetCFrame(inst)
-    if not inst then return nil end
-    if inst:IsA("Attachment") then return inst.WorldCFrame end
-    if inst:IsA("CFrameValue") then return inst.Value end
-    if inst:IsA("Vector3Value") then return CFrame.new(inst.Value) end
-    local p = partOf(inst)
-    return p and p.CFrame
-end
+do -- teleport block
+    local function targetCFrame(inst)
+        if not inst then return nil end
+        if inst:IsA("Attachment") then return inst.WorldCFrame end
+        if inst:IsA("CFrameValue") then return inst.Value end
+        if inst:IsA("Vector3Value") then return CFrame.new(inst.Value) end
+        local p = partOf(inst)
+        return p and p.CFrame
+    end
 
-addSection(tpPage, "Locations")
-local tpStatus
-local function addTeleportButton(label, finder)
-    addButton(tpPage, label, function()
-        local inst = finder()
-        local cf = targetCFrame(inst)
-        if cf then
-            teleportTo(cf)
-            tpStatus.Text = ("Teleported to %s"):format(label)
-            notify("Teleported → " .. label, T.blue)
-        else
-            tpStatus.Text = ('<font color="#ff5a5a">%s not found</font>'):format(esc(label))
-            notify(label .. " not found", T.accent)
-        end
-    end)
-end
+    addSection(tpPage, "Locations")
+    local tpStatus
+    local function addTeleportButton(label, finder)
+        addButton(tpPage, label, function()
+            local inst = finder()
+            local cf = targetCFrame(inst)
+            if cf then
+                teleportTo(cf)
+                tpStatus.Text = ("Teleported to %s"):format(label)
+                notify("Teleported → " .. label, "info")
+            else
+                tpStatus.Text = ('<font color="#ff5a5a">%s not found</font>'):format(esc(label))
+                notify(label .. " not found", "error")
+            end
+        end)
+    end
 
-addTeleportButton("Shop Pos 1", function() return workspace:FindFirstChild(CONFIG.ShopPos1Name, true) end)
-addTeleportButton("Shop Pos 2", function() return workspace:FindFirstChild(CONFIG.ShopPos2Name, true) end)
-addTeleportButton("Power Station Core", findPowerStationCore)
-addSection(tpPage, "Status")
-tpStatus = addLabel(tpPage, "Idle")
+    addTeleportButton("Shop Pos 1", function() return workspace:FindFirstChild(CONFIG.ShopPos1Name, true) end)
+    addTeleportButton("Shop Pos 2", function() return workspace:FindFirstChild(CONFIG.ShopPos2Name, true) end)
+    addTeleportButton("Power Station Core", findPowerStationCore)
+    addSection(tpPage, "Status")
+    tpStatus = addLabel(tpPage, "Idle")
+end -- end teleport block
 
 ----------------------------------------------------------------------
 -- PLAYER PAGE
 ----------------------------------------------------------------------
 local playerPage = addTab("Player", true)
-local psOriginalHold = {}
-local psStatus
 
-local function restorePowerStationPrompts()
-    for p, orig in pairs(psOriginalHold) do
-        if p and p.Parent then pcall(function() p.HoldDuration = orig end) end
-    end
-    table.clear(psOriginalHold)
-end
+do -- player page block
+    local psOriginalHold = {}
+    local psStatus
 
-addSection(playerPage, "Power Station")
-addToggle(playerPage, "Instant Fix Power Station", false, function(v)
-    flags.InstantFix = v
-    if not v then
-        restorePowerStationPrompts()
-        if psStatus then psStatus.Text = "Idle" end
+    local function restorePowerStationPrompts()
+        for p, orig in pairs(psOriginalHold) do
+            if p and p.Parent then pcall(function() p.HoldDuration = orig end) end
+        end
+        table.clear(psOriginalHold)
     end
-end)
-addButton(playerPage, "Fix Power Station now (teleport + fire)", function()
-    local prompts, ps = powerStationPrompts()
-    if not ps then psStatus.Text = '<font color="#ff5a5a">PowerStation model not found</font>' notify("PowerStation not found", T.accent) return end
-    local prompt
-    for _, p in ipairs(prompts) do
-        if promptAvailable(p) then prompt = p break end
-    end
-    if not prompt then psStatus.Text = '<font color="#ff5a5a">No enabled prompt on PowerStation</font>' return end
-    if psOriginalHold[prompt] == nil then psOriginalHold[prompt] = prompt.HoldDuration end
-    prompt.HoldDuration = CONFIG.PowerStationHold
-    local cf = promptCFrame(prompt, ps)
-    if cf then teleportTo(cf) task.wait(0.15) end
-    firePrompt(prompt)
-    psStatus.Text = "Fired PowerStation prompt"
-    notify("Power Station fixed!", T.on)
-end)
-addSection(playerPage, "Status")
-psStatus = addLabel(playerPage, "Idle")
 
-task.spawn(function()
-    while alive do
-        if flags.InstantFix then
-            local prompts, ps = powerStationPrompts()
-            if not ps then
-                psStatus.Text = "PowerStation model not found"
-            else
-                local n = 0
-                for _, p in ipairs(prompts) do
-                    if psOriginalHold[p] == nil then psOriginalHold[p] = p.HoldDuration end
-                    if p.HoldDuration ~= CONFIG.PowerStationHold then p.HoldDuration = CONFIG.PowerStationHold end
-                    n += 1
+    addSection(playerPage, "Power Station")
+    addToggle(playerPage, "Instant Fix Power Station", false, function(v)
+        flags.InstantFix = v
+        if not v then
+            restorePowerStationPrompts()
+            if psStatus then psStatus.Text = "Idle" end
+        end
+    end)
+    addButton(playerPage, "Fix Power Station now (teleport + fire)", function()
+        local prompts, ps = powerStationPrompts()
+        if not ps then psStatus.Text = '<font color="#ff5a5a">PowerStation model not found</font>' notify("PowerStation not found", "error") return end
+        local prompt
+        for _, p in ipairs(prompts) do
+            if promptAvailable(p) then prompt = p break end
+        end
+        if not prompt then psStatus.Text = '<font color="#ff5a5a">No enabled prompt on PowerStation</font>' return end
+        if psOriginalHold[prompt] == nil then psOriginalHold[prompt] = prompt.HoldDuration end
+        prompt.HoldDuration = CONFIG.PowerStationHold
+        local cf = promptCFrame(prompt, ps)
+        if cf then teleportTo(cf) task.wait(0.15) end
+        firePrompt(prompt)
+        psStatus.Text = "Fired PowerStation prompt"
+        notify("Power Station fixed!", "success")
+    end)
+    addSection(playerPage, "Status")
+    psStatus = addLabel(playerPage, "Idle")
+
+    task.spawn(function()
+        while alive do
+            if flags.InstantFix then
+                local prompts, ps = powerStationPrompts()
+                if not ps then
+                    psStatus.Text = "PowerStation model not found"
+                else
+                    local n = 0
+                    for _, p in ipairs(prompts) do
+                        if psOriginalHold[p] == nil then psOriginalHold[p] = p.HoldDuration end
+                        if p.HoldDuration ~= CONFIG.PowerStationHold then p.HoldDuration = CONFIG.PowerStationHold end
+                        n += 1
+                    end
+                    psStatus.Text = ("Hold time = %.2fs on %d prompt(s)"):format(CONFIG.PowerStationHold, n)
                 end
-                psStatus.Text = ("Hold time = %.2fs on %d prompt(s)"):format(CONFIG.PowerStationHold, n)
+                task.wait(1)
+            else
+                task.wait(0.3)
+            end
+        end
+    end)
+
+    -- World Hazards
+    addSection(playerPage, "World")
+    local hazardStatus
+    local hazardRemoved = {}
+    local hazardConn
+
+    local function isHazard(inst)
+        if not (inst:IsA("BasePart") or inst:IsA("Model")) then return false end
+        for _, n in ipairs(CONFIG.HazardNames) do
+            if inst.Name == n then return true end
+        end
+        return false
+    end
+
+    local function removeHazard(inst)
+        pcall(function()
+            if inst.Parent == nil then return end
+            hazardRemoved[#hazardRemoved + 1] = { inst = inst, parent = inst.Parent }
+            inst.Parent = nil
+        end)
+    end
+
+    addToggle(playerPage, "Remove Barbed Wire & Ragdoll Parts", false, function(v)
+        flags.Hazards = v
+        if v then
+            for _, d in ipairs(workspace:GetDescendants()) do
+                if isHazard(d) then removeHazard(d) end
+            end
+            hazardConn = workspace.DescendantAdded:Connect(function(d)
+                if flags.Hazards and isHazard(d) then task.defer(removeHazard, d) end
+            end)
+        else
+            if hazardConn then hazardConn:Disconnect() hazardConn = nil end
+            for i = #hazardRemoved, 1, -1 do
+                local r = hazardRemoved[i]
+                pcall(function() r.inst.Parent = r.parent end)
+            end
+            table.clear(hazardRemoved)
+            if hazardStatus then hazardStatus.Text = "Idle" end
+        end
+    end)
+    hazardStatus = addLabel(playerPage, "Idle")
+
+    task.spawn(function()
+        while alive do
+            if flags.Hazards then
+                hazardStatus.Text = ("Removed %d instance(s) (%s)"):format(#hazardRemoved, table.concat(CONFIG.HazardNames, ", "))
             end
             task.wait(1)
-        else
-            task.wait(0.3)
         end
-    end
-end)
-
-----------------------------------------------------------------------
--- WORLD HAZARDS
-----------------------------------------------------------------------
-addSection(playerPage, "World")
-local hazardStatus
-local hazardRemoved = {}
-local hazardConn
-
-local function isHazard(inst)
-    if not (inst:IsA("BasePart") or inst:IsA("Model")) then return false end
-    for _, n in ipairs(CONFIG.HazardNames) do
-        if inst.Name == n then return true end
-    end
-    return false
-end
-
-local function removeHazard(inst)
-    pcall(function()
-        if inst.Parent == nil then return end
-        hazardRemoved[#hazardRemoved + 1] = { inst = inst, parent = inst.Parent }
-        inst.Parent = nil
     end)
-end
 
-addToggle(playerPage, "Remove Barbed Wire & Ragdoll Parts", false, function(v)
-    flags.Hazards = v
-    if v then
-        for _, d in ipairs(workspace:GetDescendants()) do
-            if isHazard(d) then removeHazard(d) end
+    -- Movement / Combat
+    addSectionColored(playerPage, "Movement", T.blue)
+    local movExploitStatus = addLabel(playerPage, "All off")
+
+    local function refreshMovStatus()
+        local active = {}
+        local map = {
+            NoAntiSprint  = "No AntiSprint",
+            NoAntiJump    = "No AntiJump",
+            NoAntiCrouch  = "No AntiCrouch",
+            InfStamina    = "Inf Stamina",
+            NoAntiLand    = "AntiLand",
+            AntiConcuss   = "Anti-Concuss",
+            AntiStun      = "Anti-Stun",
+            AntiBleed     = "Anti-Bleed",
+            AntiFlash     = "Anti-Flash",
+        }
+        for k, label in pairs(map) do
+            if flags["mex_" .. k] then active[#active + 1] = label end
         end
-        hazardConn = workspace.DescendantAdded:Connect(function(d)
-            if flags.Hazards and isHazard(d) then task.defer(removeHazard, d) end
-        end)
-    else
-        if hazardConn then hazardConn:Disconnect() hazardConn = nil end
-        for i = #hazardRemoved, 1, -1 do
-            local r = hazardRemoved[i]
-            pcall(function() r.inst.Parent = r.parent end)
-        end
-        table.clear(hazardRemoved)
-        if hazardStatus then hazardStatus.Text = "Idle" end
+        movExploitStatus.Text = #active > 0 and table.concat(active, ", ") or "All off"
     end
-end)
-hazardStatus = addLabel(playerPage, "Idle")
 
-task.spawn(function()
-    while alive do
-        if flags.Hazards then
-            hazardStatus.Text = ("Removed %d instance(s) (%s)"):format(#hazardRemoved, table.concat(CONFIG.HazardNames, ", "))
-        end
-        task.wait(1)
-    end
-end)
+    addToggle(playerPage, "No AntiSprint (can always sprint)", false, function(v)
+        flags.mex_NoAntiSprint = v
+        refreshMovStatus()
+    end)
+    addToggle(playerPage, "No AntiJump (can always jump)", false, function(v)
+        flags.mex_NoAntiJump = v
+        refreshMovStatus()
+    end)
 
-----------------------------------------------------------------------
--- MOVEMENT / COMBAT
-----------------------------------------------------------------------
-addSectionColored(playerPage, "Movement", T.blue)
-
-local movExploitStatus = addLabel(playerPage, "All off")
-
-local function refreshMovStatus()
-    local active = {}
-    local map = {
-        NoAntiSprint  = "No AntiSprint",
-        NoAntiJump    = "No AntiJump",
-        NoAntiCrouch  = "No AntiCrouch",
-        InfStamina    = "Inf Stamina",
-        NoAntiLand    = "AntiLand",
-        AntiConcuss   = "Anti-Concuss",
-        AntiStun      = "Anti-Stun",
-        AntiBleed     = "Anti-Bleed",
-        AntiFlash     = "Anti-Flash",
-    }
-    for k, label in pairs(map) do
-        if flags["mex_"..k] then active[#active+1] = label end
-    end
-    movExploitStatus.Text = #active > 0 and table.concat(active, ", ") or "All off"
-end
-
-addToggle(playerPage, "No AntiSprint (can always sprint)", false, function(v)
-    flags.mex_NoAntiSprint = v
-    refreshMovStatus()
-end)
-
-addToggle(playerPage, "No AntiJump (can always jump)", false, function(v)
-    flags.mex_NoAntiJump = v
-    refreshMovStatus()
-end)
-
--- Anti-jump and anti-crouch destruction loop
-task.spawn(function()
-    while alive do
-        if flags.mex_NoAntiJump or flags.mex_NoAntiCrouch then
-            local cur = getCurrentsFolder()
-            if cur then
-                for _, v in ipairs(cur:GetChildren()) do
-                    if flags.mex_NoAntiJump and v.Name == "AntiJump" and not injectedCurrents["AntiJump"] then
-                        pcall(function() v:Destroy() end)
-                    end
-                    if flags.mex_NoAntiCrouch and v.Name == "AntiCrouch" and not injectedCurrents["AntiCrouch"] then
-                        pcall(function() v:Destroy() end)
-                    end
-                end
-            end
-        end
-        task.wait(0.1)
-    end
-end)
-
-addToggle(playerPage, "No AntiCrouch (can always crouch)", false, function(v)
-    flags.mex_NoAntiCrouch = v
-    refreshMovStatus()
-end)
-
--- AntiLand: inject the AntiLand boolean (gives you the buff instead of removing it)
-addToggle(playerPage, "Give AntiLand (no landing penalty)", false, function(v)
-    flags.mex_NoAntiLand = v
-    manageCurrent("AntiLand", v)
-    refreshMovStatus()
-end)
-
-addSectionColored(playerPage, "Combat", T.purple)
-
-addToggle(playerPage, "Anti-Concuss (no concuss effect)", false, function(v)
-    flags.mex_AntiConcuss = v
-    manageCurrent("AntiConcuss", v)
-    refreshMovStatus()
-end)
-
-addToggle(playerPage, "Anti-Stun (destroy Stunned current)", false, function(v)
-    flags.mex_AntiStun = v
-    refreshMovStatus()
-end)
-
-task.spawn(function()
-    while alive do
-        if flags.mex_AntiStun then
-            local cur = getCurrentsFolder()
-            if cur then
-                for _, v in ipairs(cur:GetChildren()) do
-                    if v.Name == "Stunned" then pcall(function() v:Destroy() end) end
-                end
-            end
-        end
-        task.wait(0.08)
-    end
-end)
-
-addToggle(playerPage, "Anti-Bleed (destroy Bleeding current)", false, function(v)
-    flags.mex_AntiBleed = v
-    refreshMovStatus()
-end)
-
-task.spawn(function()
-    while alive do
-        if flags.mex_AntiBleed then
-            local cur = getCurrentsFolder()
-            if cur then
-                for _, v in ipairs(cur:GetChildren()) do
-                    if v.Name == "Bleeding" then pcall(function() v:Destroy() end) end
-                end
-            end
-        end
-        task.wait(0.08)
-    end
-end)
-
-addToggle(playerPage, "Anti-Flash (destroy flash currents)", false, function(v)
-    flags.mex_AntiFlash = v
-    refreshMovStatus()
-end)
-
-task.spawn(function()
-    while alive do
-        if flags.mex_AntiFlash then
-            local cur = getCurrentsFolder()
-            if cur then
-                for _, v in ipairs(cur:GetChildren()) do
-                    if v.Name == "FlashedPreFade" or v.Name == "SPerc_Flashed" then
-                        pcall(function() v:Destroy() end)
-                    end
-                end
-            end
-        end
-        task.wait(0.05)
-    end
-end)
-
-----------------------------------------------------------------------
--- SPEED HELPER
-----------------------------------------------------------------------
-addSectionHelp(playerPage, "Speed Helper", table.concat({
-    "1) Turn the helper on.",
-    "2) Equip a weapon and swing it (or just hold it).",
-    "3) The script waits for a value starting with \"Speed\" inside your Currents folder and clones it as \"" .. CONFIG.SpeedCloneName .. "\".",
-    "4) Once the clone exists the controls unlock: pick Speed up or Slow down and set the amount (0-" .. CONFIG.SpeedLimit .. ").",
-    "",
-    "Turning the helper off removes the clone.",
-}, "\n"))
-
-local speedAmount, speedSlow = 0, false
-local speedClone, speedUnlocked = nil, false
-local speedStatus, speedModeBtn, speedSlider, speedBox
-
-local function desiredSpeedValue()
-    if speedAmount == 0 then return 0 end
-    return speedSlow and speedAmount or -speedAmount
-end
-
-local function applySpeed()
-    if speedClone and speedClone.Parent then
-        pcall(function()
-            local want = desiredSpeedValue()
-            if speedClone.Value ~= want then speedClone.Value = want end
-        end)
-    end
-end
-
-local function refreshSpeedUI()
-    speedSlider.Label.Text = (speedSlow and "Slow down: " or "Speed up: ") .. speedAmount
-    speedModeBtn.Text = speedSlow and "Mode: Slow down" or "Mode: Speed up"
-end
-
-local function lockSpeedUI(locked)
-    speedUnlocked = not locked
-    speedSlider:SetLocked(locked)
-    speedModeBtn.BackgroundTransparency = locked and 0.5 or 0
-    speedBox.TextEditable = not locked
-    speedBox.BackgroundTransparency = locked and 0.5 or 0
-end
-
-local function getCurrents_legacy()
-    local cd = game:GetService("ReplicatedStorage"):FindFirstChild("CharacterData")
-    local mine = cd and cd:FindFirstChild(LP.Name)
-    local stuff = mine and mine:FindFirstChild("PlayerStuff")
-    return stuff and stuff:FindFirstChild("Currents")
-end
-
-addToggle(playerPage, "Enable Speed Helper", false, function(v)
-    flags.Speed = v
-    if not v then
-        if speedClone then pcall(function() speedClone:Destroy() end) end
-        speedClone = nil
-        lockSpeedUI(true)
-        speedStatus.Text = "Idle"
-    else
-        speedStatus.Text = "Waiting for a Speed value... equip a weapon and swing/hold it"
-    end
-end)
-
-speedModeBtn = addButton(playerPage, "Mode: Speed up", function()
-    if not speedUnlocked then return end
-    speedSlow = not speedSlow
-    refreshSpeedUI()
-    applySpeed()
-end)
-speedSlider = addSlider(playerPage, "Speed up: 0", 0, CONFIG.SpeedLimit, 0, function(v)
-    speedAmount = v
-    refreshSpeedUI()
-    applySpeed()
-end)
-speedBox = addTextbox(playerPage, "or type an amount (0-" .. CONFIG.SpeedLimit .. ")", function(t)
-    local n = tonumber(t)
-    speedBox.Text = ""
-    if speedUnlocked and n then speedSlider:Set(math.abs(n)) end
-end)
-speedStatus = addLabel(playerPage, "Idle")
-lockSpeedUI(true)
-
-task.spawn(function()
-    while alive do
-        if flags.Speed then
-            local cur = getCurrents_legacy()
-            if not cur then
-                speedStatus.Text = "Waiting for Currents folder..."
-            else
-                if speedClone and speedClone.Parent ~= cur then
-                    speedClone = nil
-                    lockSpeedUI(true)
-                end
-                if not speedClone then
-                    for _, c in ipairs(cur:GetChildren()) do
-                        if c.Name ~= CONFIG.SpeedCloneName and c.Name:sub(1, 5) == "Speed" and (c:IsA("NumberValue") or c:IsA("IntValue")) then
-                            local cl = c:Clone()
-                            cl.Name = CONFIG.SpeedCloneName
-                            cl.Value = desiredSpeedValue()
-                            cl.Parent = cur
-                            speedClone = cl
-                            lockSpeedUI(false)
-                            break
+    task.spawn(function()
+        while alive do
+            if flags.mex_NoAntiJump or flags.mex_NoAntiCrouch then
+                local cur = getCurrentsFolder()
+                if cur then
+                    for _, v in ipairs(cur:GetChildren()) do
+                        if flags.mex_NoAntiJump and v.Name == "AntiJump" and not injectedCurrents["AntiJump"] then
+                            pcall(function() v:Destroy() end)
+                        end
+                        if flags.mex_NoAntiCrouch and v.Name == "AntiCrouch" and not injectedCurrents["AntiCrouch"] then
+                            pcall(function() v:Destroy() end)
                         end
                     end
-                    if not speedClone then
-                        speedStatus.Text = "Waiting for a Speed value... equip a weapon and swing/hold it"
+                end
+            end
+            task.wait(0.1)
+        end
+    end)
+
+    addToggle(playerPage, "No AntiCrouch (can always crouch)", false, function(v)
+        flags.mex_NoAntiCrouch = v
+        refreshMovStatus()
+    end)
+    addToggle(playerPage, "Give AntiLand (no landing penalty)", false, function(v)
+        flags.mex_NoAntiLand = v
+        manageCurrent("AntiLand", v)
+        refreshMovStatus()
+    end)
+
+    addSectionColored(playerPage, "Combat", T.purple)
+    addToggle(playerPage, "Anti-Concuss (no concuss effect)", false, function(v)
+        flags.mex_AntiConcuss = v
+        manageCurrent("AntiConcuss", v)
+        refreshMovStatus()
+    end)
+    addToggle(playerPage, "Anti-Stun (destroy Stunned current)", false, function(v)
+        flags.mex_AntiStun = v
+        refreshMovStatus()
+    end)
+
+    task.spawn(function()
+        while alive do
+            if flags.mex_AntiStun then
+                local cur = getCurrentsFolder()
+                if cur then
+                    for _, v in ipairs(cur:GetChildren()) do
+                        if v.Name == "Stunned" then pcall(function() v:Destroy() end) end
                     end
-                else
-                    applySpeed()
-                    speedStatus.Text = ("Unlocked - %s %d"):format(speedSlow and "slow down" or "speed up", speedAmount)
                 end
             end
-            task.wait(0.25)
+            task.wait(0.08)
+        end
+    end)
+
+    addToggle(playerPage, "Anti-Bleed (destroy Bleeding current)", false, function(v)
+        flags.mex_AntiBleed = v
+        refreshMovStatus()
+    end)
+
+    task.spawn(function()
+        while alive do
+            if flags.mex_AntiBleed then
+                local cur = getCurrentsFolder()
+                if cur then
+                    for _, v in ipairs(cur:GetChildren()) do
+                        if v.Name == "Bleeding" then pcall(function() v:Destroy() end) end
+                    end
+                end
+            end
+            task.wait(0.08)
+        end
+    end)
+
+    addToggle(playerPage, "Anti-Flash (destroy flash currents)", false, function(v)
+        flags.mex_AntiFlash = v
+        refreshMovStatus()
+    end)
+
+    task.spawn(function()
+        while alive do
+            if flags.mex_AntiFlash then
+                local cur = getCurrentsFolder()
+                if cur then
+                    for _, v in ipairs(cur:GetChildren()) do
+                        if v.Name == "FlashedPreFade" or v.Name == "SPerc_Flashed" then
+                            pcall(function() v:Destroy() end)
+                        end
+                    end
+                end
+            end
+            task.wait(0.05)
+        end
+    end)
+
+    -- Speed Helper
+    addSectionHelp(playerPage, "Speed Helper", table.concat({
+        "1) Turn the helper on.",
+        "2) Equip a weapon and swing it (or just hold it).",
+        "3) The script waits for a value starting with \"Speed\" inside your Currents folder and clones it as \"" .. CONFIG.SpeedCloneName .. "\".",
+        "4) Once the clone exists the controls unlock: pick Speed up or Slow down and set the amount (0-" .. CONFIG.SpeedLimit .. ").",
+        "",
+        "Turning the helper off removes the clone.",
+    }, "\n"))
+
+    local speedAmount, speedSlow = 0, false
+    local speedClone, speedUnlocked = nil, false
+    local speedStatus, speedModeBtn, speedSlider, speedBox
+
+    local function desiredSpeedValue()
+        if speedAmount == 0 then return 0 end
+        return speedSlow and speedAmount or -speedAmount
+    end
+
+    local function applySpeed()
+        if speedClone and speedClone.Parent then
+            pcall(function()
+                local want = desiredSpeedValue()
+                if speedClone.Value ~= want then speedClone.Value = want end
+            end)
+        end
+    end
+
+    local function refreshSpeedUI()
+        speedSlider.Label.Text = (speedSlow and "Slow down: " or "Speed up: ") .. speedAmount
+        speedModeBtn.Text = speedSlow and "Mode: Slow down" or "Mode: Speed up"
+    end
+
+    local function lockSpeedUI(locked)
+        speedUnlocked = not locked
+        speedSlider:SetLocked(locked)
+        speedModeBtn.BackgroundTransparency = locked and 0.5 or 0
+        speedBox.TextEditable = not locked
+        speedBox.BackgroundTransparency = locked and 0.5 or 0
+    end
+
+    addToggle(playerPage, "Enable Speed Helper", false, function(v)
+        flags.Speed = v
+        if not v then
+            if speedClone then pcall(function() speedClone:Destroy() end) end
+            speedClone = nil
+            lockSpeedUI(true)
+            speedStatus.Text = "Idle"
         else
-            task.wait(0.3)
+            speedStatus.Text = "Waiting for a Speed value... equip a weapon and swing/hold it"
         end
-    end
-end)
+    end)
 
-----------------------------------------------------------------------
--- PSEUDO INFINITE STAMINA  (EnergizedRAGESPELL only)
-----------------------------------------------------------------------
-addSectionHelp(playerPage, "Pseudo Infinite Stamina", table.concat({
-    "Injects EnergizedRAGESPELL into your Currents folder.",
-    "On enable:",
-    "• Rage spell animations are stopped.",
-    "• FOV / Speed side-effect currents are removed.",
-    "• The rage spell ColorCorrection (the vision tint/distortion on your camera) is detected by watching it change values rapidly and destroyed automatically.",
-    "",
-    "NOTE: Uses the Energy Drink effect — you may occasionally run low on stamina.",
-}, "\n"))
+    speedModeBtn = addButton(playerPage, "Mode: Speed up", function()
+        if not speedUnlocked then return end
+        speedSlow = not speedSlow
+        refreshSpeedUI()
+        applySpeed()
+    end)
+    speedSlider = addSlider(playerPage, "Speed up: 0", 0, CONFIG.SpeedLimit, 0, function(v)
+        speedAmount = v
+        refreshSpeedUI()
+        applySpeed()
+    end)
+    speedBox = addTextbox(playerPage, "or type an amount (0-" .. CONFIG.SpeedLimit .. ")", function(t)
+        local n = tonumber(t)
+        speedBox.Text = ""
+        if speedUnlocked and n then speedSlider:Set(math.abs(n)) end
+    end)
+    speedStatus = addLabel(playerPage, "Idle")
+    lockSpeedUI(true)
 
-local Drink = {
-    inst = nil, spawnAt = 0, removed = 0,
-    binding = false, key = nil, toggle = nil, status = nil,
-}
-
-local function isRageSpellFOV(name)
-    for _, n in ipairs(CONFIG.RageSpellFOVCurrent) do
-        if name:lower() == n:lower() then return true end
-    end
-    return false
-end
-
-local function cleanRageSpellSideEffects(cur)
-    if not cur then return end
-    for _, v in ipairs(cur:GetChildren()) do
-        if isRageSpellFOV(v.Name) or v.Name == "Speed_EnergizedRAGESPELL" then
-            pcall(function() v:Destroy() end)
-            Drink.removed += 1
-        end
-    end
-    -- Also clean PlayerStuff/FOVs if it exists
-    local stuff = cur.Parent
-    if stuff then
-        local fovs = stuff:FindFirstChild("FOVs")
-        if fovs then
-            for _, v in ipairs(fovs:GetChildren()) do
-                if isRageSpellFOV(v.Name) or v.Name:lower():find("rage", 1, true) then
-                    pcall(function() v:Destroy() end)
-                end
-            end
-        end
-    end
-end
-
--- ColorCorrection killer for the rage spell camera effect.
--- The rage spell injects a ColorCorrectionEffect into CurrentCamera and
--- continuously mutates its Brightness/Contrast/Saturation/TintColor every
--- frame.  We detect any CC that changes two or more of those properties
--- within a 1-second observation window and destroy it.  A static CC (e.g.
--- one the game ships permanently) will never hit the change threshold.
-local rageCC = {
-    watched  = {},   -- [ColorCorrectionEffect] = { props snapshot, changeCount, firstSeenAt }
-    removed  = 0,
-}
-
-local function snapCC(cc)
-    return { cc.Brightness, cc.Contrast, cc.Saturation, cc.TintColor }
-end
-
-local function snapshotsDiffer(a, b)
-    return a[1] ~= b[1] or a[2] ~= b[2] or a[3] ~= b[3] or a[4] ~= b[4]
-end
-
-local function killRageColorCorrections()
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-
-    local now = tick()
-    local seen = {}
-
-    for _, child in ipairs(cam:GetChildren()) do
-        if child:IsA("ColorCorrectionEffect") then
-            seen[child] = true
-            local rec = rageCC.watched[child]
-            if not rec then
-                -- First time we see this CC — record its initial state
-                rageCC.watched[child] = {
-                    snap     = snapCC(child),
-                    changes  = 0,
-                    seenAt   = now,
-                }
-            else
-                local newSnap = snapCC(child)
-                if snapshotsDiffer(rec.snap, newSnap) then
-                    rec.changes += 1
-                    rec.snap = newSnap
-                end
-                -- After 1 second of observation: if it changed ≥2 times it's
-                -- the rage spell CC — nuke it.
-                if now - rec.seenAt >= 1 and rec.changes >= 2 then
-                    pcall(function() child:Destroy() end)
-                    rageCC.watched[child] = nil
-                    rageCC.removed += 1
-                    seen[child] = nil
-                end
-            end
-        end
-    end
-
-    -- Prune entries for CCs that were already destroyed externally
-    for cc in pairs(rageCC.watched) do
-        if not seen[cc] then
-            rageCC.watched[cc] = nil
-        end
-    end
-end
-
-local function injectEnergizedRage()
-    local cur = getCurrents_legacy()
-    if not cur then return nil end
-    -- Check if already injected and alive
-    if Drink.inst and Drink.inst.Parent == cur then
-        Drink.inst.Value = true
-        return Drink.inst
-    end
-    -- Clean stale
-    if Drink.inst then pcall(function() Drink.inst:Destroy() end) Drink.inst = nil end
-    -- Find a BoolValue template
-    local template
-    for _, v in ipairs(cur:GetChildren()) do
-        if v:IsA("BoolValue") and not v:GetAttribute("RD_Clone") then
-            template = v break
-        end
-    end
-    if not template then return nil end
-    local cl = template:Clone()
-    cl.Name = "EnergizedRAGESPELL"
-    cl.Value = true
-    cl:SetAttribute("RD_Clone", true)
-    cl.Parent = cur
-    Drink.inst = cl
-    return cl
-end
-
-local function removeDrinkClone()
-    if Drink.inst then pcall(function() Drink.inst:Destroy() end) end
-    Drink.inst = nil
-end
-
-Drink.toggle = addToggle(playerPage, "Pseudo Infinite Stamina", false, function(v)
-    flags.Drink = v
-    if not v then
-        removeDrinkClone()
-        Drink.removed = 0
-        rageCC.removed = 0
-        table.clear(rageCC.watched)
-        if Drink.status then Drink.status.Text = "Idle" end
-    end
-end)
-Drink.status = addLabel(playerPage, "Idle")
-
-track(LP.CharacterAdded:Connect(function() Drink.spawnAt = tick() end))
-
-task.spawn(function()
-    while alive do
-        if flags.Drink then
-            local cur = getCurrents_legacy()
-            local ch = LP.Character
-            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-
-            if not (cur and hum and hum.Health > 0) then
-                Drink.status.Text = "Waiting for character / Currents folder..."
-            elseif tick() - Drink.spawnAt < 2.5 then
-                Drink.status.Text = "Waiting for character to fully load..."
-            else
-                local inst = injectEnergizedRage()
-                if not inst then
-                    Drink.status.Text = "No BoolValue template in Currents yet — equip a tool and wait..."
+    task.spawn(function()
+        while alive do
+            if flags.Speed then
+                local cur = getCurrents_legacy()
+                if not cur then
+                    speedStatus.Text = "Waiting for Currents folder..."
                 else
-                    -- Keep it alive
-                    inst.Value = true
-                    -- Stop animations to suppress rage spell visuals
-                    local animator = hum:FindFirstChildOfClass("Animator")
-                    if animator then
-                        local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
-                        if ok and tracks then
-                            for _, track in ipairs(tracks) do
-                                if track.Name:lower():find("rage", 1, true) or track.Name:lower():find("spell", 1, true) then
-                                    pcall(function() track:Stop(0) end)
+                    if speedClone and speedClone.Parent ~= cur then
+                        speedClone = nil
+                        lockSpeedUI(true)
+                    end
+                    if not speedClone then
+                        for _, c in ipairs(cur:GetChildren()) do
+                            if c.Name ~= CONFIG.SpeedCloneName and c.Name:sub(1, 5) == "Speed" and (c:IsA("NumberValue") or c:IsA("IntValue")) then
+                                local cl = c:Clone()
+                                cl.Name = CONFIG.SpeedCloneName
+                                cl.Value = desiredSpeedValue()
+                                cl.Parent = cur
+                                speedClone = cl
+                                lockSpeedUI(false)
+                                break
+                            end
+                        end
+                        if not speedClone then
+                            speedStatus.Text = "Waiting for a Speed value... equip a weapon and swing/hold it"
+                        end
+                    else
+                        applySpeed()
+                        speedStatus.Text = ("Unlocked - %s %d"):format(speedSlow and "slow down" or "speed up", speedAmount)
+                    end
+                end
+                task.wait(0.25)
+            else
+                task.wait(0.3)
+            end
+        end
+    end)
+
+    -- Pseudo Infinite Stamina
+    addSectionHelp(playerPage, "Pseudo Infinite Stamina", table.concat({
+        "Injects EnergizedRAGESPELL into your Currents folder.",
+        "On enable:",
+        "• Rage spell animations are stopped.",
+        "• FOV / Speed side-effect currents are removed.",
+        "• The rage spell ColorCorrection is detected by watching it change values rapidly and destroyed automatically.",
+        "",
+        "NOTE: Uses the Energy Drink effect — you may occasionally run low on stamina.",
+    }, "\n"))
+
+    local Drink = { inst = nil, spawnAt = 0, removed = 0, key = nil, toggle = nil, status = nil }
+
+    local function isRageSpellFOV(name)
+        for _, n in ipairs(CONFIG.RageSpellFOVCurrent) do
+            if name:lower() == n:lower() then return true end
+        end
+        return false
+    end
+
+    local function cleanRageSpellSideEffects(cur)
+        if not cur then return end
+        for _, v in ipairs(cur:GetChildren()) do
+            if isRageSpellFOV(v.Name) or v.Name == "Speed_EnergizedRAGESPELL" then
+                pcall(function() v:Destroy() end)
+                Drink.removed += 1
+            end
+        end
+        local stuff = cur.Parent
+        if stuff then
+            local fovs = stuff:FindFirstChild("FOVs")
+            if fovs then
+                for _, v in ipairs(fovs:GetChildren()) do
+                    if isRageSpellFOV(v.Name) or v.Name:lower():find("rage", 1, true) then
+                        pcall(function() v:Destroy() end)
+                    end
+                end
+            end
+        end
+    end
+
+    local rageCC = { watched = {}, removed = 0 }
+
+    local function snapCC(cc)
+        return { cc.Brightness, cc.Contrast, cc.Saturation, cc.TintColor }
+    end
+
+    local function snapshotsDiffer(a, b)
+        return a[1] ~= b[1] or a[2] ~= b[2] or a[3] ~= b[3] or a[4] ~= b[4]
+    end
+
+    local function killRageColorCorrections()
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local now = tick()
+        local seen = {}
+        for _, child in ipairs(cam:GetChildren()) do
+            if child:IsA("ColorCorrectionEffect") then
+                seen[child] = true
+                local rec = rageCC.watched[child]
+                if not rec then
+                    rageCC.watched[child] = { snap = snapCC(child), changes = 0, seenAt = now }
+                else
+                    local newSnap = snapCC(child)
+                    if snapshotsDiffer(rec.snap, newSnap) then
+                        rec.changes += 1
+                        rec.snap = newSnap
+                    end
+                    if now - rec.seenAt >= 1 and rec.changes >= 2 then
+                        pcall(function() child:Destroy() end)
+                        rageCC.watched[child] = nil
+                        rageCC.removed += 1
+                        seen[child] = nil
+                    end
+                end
+            end
+        end
+        for cc in pairs(rageCC.watched) do
+            if not seen[cc] then rageCC.watched[cc] = nil end
+        end
+    end
+
+    local function injectEnergizedRage()
+        local cur = getCurrents_legacy()
+        if not cur then return nil end
+        if Drink.inst and Drink.inst.Parent == cur then
+            Drink.inst.Value = true
+            return Drink.inst
+        end
+        if Drink.inst then pcall(function() Drink.inst:Destroy() end) Drink.inst = nil end
+        local template
+        for _, v in ipairs(cur:GetChildren()) do
+            if v:IsA("BoolValue") and not v:GetAttribute("RD_Clone") then
+                template = v break
+            end
+        end
+        if not template then return nil end
+        local cl = template:Clone()
+        cl.Name = "EnergizedRAGESPELL"
+        cl.Value = true
+        cl:SetAttribute("RD_Clone", true)
+        cl.Parent = cur
+        Drink.inst = cl
+        return cl
+    end
+
+    local function removeDrinkClone()
+        if Drink.inst then pcall(function() Drink.inst:Destroy() end) end
+        Drink.inst = nil
+    end
+
+    Drink.toggle = addToggle(playerPage, "Pseudo Infinite Stamina", false, function(v)
+        flags.Drink = v
+        if not v then
+            removeDrinkClone()
+            Drink.removed = 0
+            rageCC.removed = 0
+            table.clear(rageCC.watched)
+            if Drink.status then Drink.status.Text = "Idle" end
+        end
+    end)
+    Drink.status = addLabel(playerPage, "Idle")
+
+    track(LP.CharacterAdded:Connect(function() Drink.spawnAt = tick() end))
+
+    task.spawn(function()
+        while alive do
+            if flags.Drink then
+                local cur = getCurrents_legacy()
+                local ch = LP.Character
+                local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                if not (cur and hum and hum.Health > 0) then
+                    Drink.status.Text = "Waiting for character / Currents folder..."
+                elseif tick() - Drink.spawnAt < 2.5 then
+                    Drink.status.Text = "Waiting for character to fully load..."
+                else
+                    local inst = injectEnergizedRage()
+                    if not inst then
+                        Drink.status.Text = "No BoolValue template in Currents yet — equip a tool and wait..."
+                    else
+                        inst.Value = true
+                        local animator = hum:FindFirstChildOfClass("Animator")
+                        if animator then
+                            local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+                            if ok and tracks then
+                                for _, tr in ipairs(tracks) do
+                                    if tr.Name:lower():find("rage", 1, true) or tr.Name:lower():find("spell", 1, true) then
+                                        pcall(function() tr:Stop(0) end)
+                                    end
                                 end
                             end
                         end
+                        cleanRageSpellSideEffects(cur)
+                        killRageColorCorrections()
+                        Drink.status.Text = ("Active: EnergizedRAGESPELL | currents cleaned: %d | CC removed: %d"):format(
+                            Drink.removed, rageCC.removed)
                     end
-                    -- Remove side-effect currents (folder entries)
-                    cleanRageSpellSideEffects(cur)
-                    -- Remove the rage spell ColorCorrection from CurrentCamera
-                    killRageColorCorrections()
-                    Drink.status.Text = ("Active: EnergizedRAGESPELL | currents cleaned: %d | CC removed: %d"):format(
-                        Drink.removed, rageCC.removed)
                 end
+                task.wait(0.25)
+            else
+                task.wait(0.3)
             end
-            task.wait(0.25)
-        else
-            task.wait(0.3)
         end
+    end)
+
+    if S.StaminaKey ~= "" then
+        local ok, k = pcall(function() return Enum.KeyCode[S.StaminaKey] end)
+        if ok and k then Drink.key = k end
     end
-end)
+
+    -- expose Drink globally for keybind handler below
+    _G.__HappyMod_Drink = Drink
+end -- end player page block
+
+-- grab back Drink reference for keybind handler
+local Drink = _G.__HappyMod_Drink
 
 ----------------------------------------------------------------------
 -- MISC PAGE
 ----------------------------------------------------------------------
 local miscPage = addTab("Misc", false)
-local subs = addSubTabs(miscPage, { "Console", "Info", "Settings" })
+local miscSubs = addSubTabs(miscPage, { "Info", "Settings" })
 
-local logLines, logDirty = {}, false
-local logColors = {
-    [Enum.MessageType.MessageOutput] = "#e6e6ee", [Enum.MessageType.MessageInfo] = "#6ab0ff",
-    [Enum.MessageType.MessageWarning] = "#ffcc4d", [Enum.MessageType.MessageError] = "#ff5a5a",
-}
-local function pushLog(msg, mtype)
-    if #msg > 300 then msg = msg:sub(1, 300) .. "..." end
-    logLines[#logLines + 1] = ('<font color="#777777">%s</font> <font color="%s">%s</font>'):format(os.date("%H:%M:%S"), logColors[mtype] or "#e6e6ee", esc(msg))
-    if #logLines > CONFIG.MaxConsoleLines then table.remove(logLines, 1) end
-    logDirty = true
-end
+do -- info block
+    local fps = 60
+    track(RunService.RenderStepped:Connect(function(dt) fps = fps + (1 / math.max(dt, 1e-4) - fps) * 0.1 end))
 
-addButton(subs.Console, "Clear console", function() logLines = {} logDirty = true end)
-local consoleLabel = addLabel(subs.Console, "")
-for _, entry in ipairs(LogService:GetLogHistory()) do pushLog(entry.message, entry.messageType) end
-track(LogService.MessageOut:Connect(pushLog))
+    addSection(miscSubs.Info, "Game")
+    local gameLabel = addLabel(miscSubs.Info, "")
+    addSection(miscSubs.Info, "Players")
+    local playersLabel = addLabel(miscSubs.Info, "")
+    addSection(miscSubs.Info, "Local Player")
+    local localLabel = addLabel(miscSubs.Info, "")
+    addSection(miscSubs.Info, "Active Currents (injected)")
+    local currentsLabel = addLabel(miscSubs.Info, "none")
 
-task.spawn(function()
-    while alive do
-        if logDirty then
-            logDirty = false
-            local sf = subs.Console
-            local atBottom = sf.CanvasPosition.Y >= sf.AbsoluteCanvasSize.Y - sf.AbsoluteSize.Y - 30
-            consoleLabel.Text = table.concat(logLines, "\n")
-            if atBottom then
-                task.wait()
-                sf.CanvasPosition = Vector2.new(0, 1e6)
-            end
-        end
-        task.wait(0.3)
+    local function getPing()
+        local ok, v = pcall(function() return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() end)
+        return ok and math.floor(v) or -1
     end
-end)
 
--- Info tab
-local fps = 60
-track(RunService.RenderStepped:Connect(function(dt) fps = fps + (1 / math.max(dt, 1e-4) - fps) * 0.1 end))
+    task.spawn(function()
+        while alive do
+            gameLabel.Text = table.concat({
+                ("Name:     %s"):format(esc(game.Name)),
+                ("PlaceId:  %d"):format(game.PlaceId),
+                ("GameId:   %d"):format(game.GameId),
+                ("PlaceVer: %d"):format(game.PlaceVersion),
+                ("JobId:    %s"):format(game.JobId ~= "" and game.JobId or "Studio"),
+                ("Players:  %d/%d"):format(#Players:GetPlayers(), Players.MaxPlayers),
+                ("Uptime:   %ds"):format(math.floor(workspace.DistributedGameTime)),
+                ("FPS:      %d   Ping: %dms"):format(math.floor(fps), getPing()),
+            }, "\n")
 
-addSection(subs.Info, "Game")
-local gameLabel = addLabel(subs.Info, "")
-addSection(subs.Info, "Players")
-local playersLabel = addLabel(subs.Info, "")
-addSection(subs.Info, "Local Player")
-local localLabel = addLabel(subs.Info, "")
-addSection(subs.Info, "Active Currents (injected)")
-local currentsLabel = addLabel(subs.Info, "none")
+            local hrp = getHRP()
+            local pl = {}
+            for idx, p in ipairs(Players:GetPlayers()) do
+                local ch = p.Character
+                local h = ch and ch:FindFirstChildOfClass("Humanoid")
+                local part = ch and ch:FindFirstChild("HumanoidRootPart")
+                local d = (hrp and part) and math.floor((part.Position - hrp.Position).Magnitude) or 0
+                local shown = ("Player %d"):format(idx)
+                pl[#pl + 1] = ("%s | HP %s | %d studs%s"):format(shown, h and math.floor(h.Health) or "-", d, p == LP and " [you]" or "")
+            end
+            playersLabel.Text = table.concat(pl, "\n")
 
-local function getPing()
-    local ok, v = pcall(function() return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() end)
-    return ok and math.floor(v) or -1
-end
-
-task.spawn(function()
-    while alive do
-        gameLabel.Text = table.concat({
-            ("Name:     %s"):format(esc(game.Name)),
-            ("PlaceId:  %d"):format(game.PlaceId),
-            ("GameId:   %d"):format(game.GameId),
-            ("PlaceVer: %d"):format(game.PlaceVersion),
-            ("JobId:    %s"):format(game.JobId ~= "" and game.JobId or "Studio"),
-            ("Players:  %d/%d"):format(#Players:GetPlayers(), Players.MaxPlayers),
-            ("Uptime:   %ds"):format(math.floor(workspace.DistributedGameTime)),
-            ("FPS:      %d   Ping: %dms"):format(math.floor(fps), getPing()),
-        }, "\n")
-
-        local hrp = getHRP()
-        local pl = {}
-        for _, p in ipairs(Players:GetPlayers()) do
-            local ch = p.Character
+            local ch = LP.Character
             local h = ch and ch:FindFirstChildOfClass("Humanoid")
-            local part = ch and ch:FindFirstChild("HumanoidRootPart")
-            local d = (hrp and part) and math.floor((part.Position - hrp.Position).Magnitude) or 0
-            pl[#pl + 1] = ("%s | HP %s | %d studs%s"):format(
-                esc(p.Name), h and math.floor(h.Health) or "-", d, p == LP and " [you]" or "")
-        end
-        playersLabel.Text = table.concat(pl, "\n")
+            local lines = {}
+            if h then
+                lines[#lines + 1] = ("Health:    %d / %d"):format(math.floor(h.Health), math.floor(h.MaxHealth))
+                lines[#lines + 1] = ("WalkSpeed: %s"):format(h.WalkSpeed)
+                lines[#lines + 1] = h.UseJumpPower and ("JumpPower: %s"):format(h.JumpPower) or ("JumpHeight: %s"):format(h.JumpHeight)
+                lines[#lines + 1] = ("State:     %s"):format((tostring(h:GetState()):gsub("Enum.HumanoidStateType.", "")))
+            end
+            if hrp then
+                local p = hrp.Position
+                lines[#lines + 1] = ("Position:  %d, %d, %d"):format(p.X, p.Y, p.Z)
+                lines[#lines + 1] = ("Speed:     %d studs/s"):format(hrp.AssemblyLinearVelocity.Magnitude)
+            end
+            local ls = LP:FindFirstChild("leaderstats")
+            if ls then
+                lines[#lines + 1] = '<font color="#ff8a8a">-- leaderstats --</font>'
+                for _, v in ipairs(ls:GetChildren()) do
+                    if v:IsA("ValueBase") then lines[#lines + 1] = ("%s = %s"):format(esc(v.Name), esc(tostring(v.Value))) end
+                end
+            end
+            lines[#lines + 1] = '<font color="#ff8a8a">-- character attributes --</font>'
+            if ch then lines[#lines + 1] = attrText(ch) end
+            if h then
+                lines[#lines + 1] = '<font color="#ff8a8a">-- humanoid attributes --</font>'
+                lines[#lines + 1] = attrText(h)
+            end
+            localLabel.Text = table.concat(lines, "\n")
 
-        local ch = LP.Character
-        local h = ch and ch:FindFirstChildOfClass("Humanoid")
-        local lines = {}
-        if h then
-            lines[#lines + 1] = ("Health:    %d / %d"):format(math.floor(h.Health), math.floor(h.MaxHealth))
-            lines[#lines + 1] = ("WalkSpeed: %s"):format(h.WalkSpeed)
-            lines[#lines + 1] = h.UseJumpPower and ("JumpPower: %s"):format(h.JumpPower) or ("JumpHeight: %s"):format(h.JumpHeight)
-            lines[#lines + 1] = ("State:     %s"):format((tostring(h:GetState()):gsub("Enum.HumanoidStateType.", "")))
+            local ci = {}
+            for k in pairs(currentKeepalive) do ci[#ci + 1] = '<font color="#6ab0ff">' .. esc(k) .. '</font>' end
+            for k, v in pairs(numCurrentKeepalive) do ci[#ci + 1] = '<font color="#ffcc4d">' .. esc(k) .. '=' .. tostring(v) .. '</font>' end
+            currentsLabel.Text = #ci > 0 and table.concat(ci, "  ") or '<font color="#888888">none</font>'
+
+            task.wait(1)
         end
-        if hrp then
-            local p = hrp.Position
-            lines[#lines + 1] = ("Position:  %d, %d, %d"):format(p.X, p.Y, p.Z)
-            lines[#lines + 1] = ("Speed:     %d studs/s"):format(hrp.AssemblyLinearVelocity.Magnitude)
-        end
-        local ls = LP:FindFirstChild("leaderstats")
-        if ls then
-            lines[#lines + 1] = '<font color="#ff8a8a">-- leaderstats --</font>'
-            for _, v in ipairs(ls:GetChildren()) do
-                if v:IsA("ValueBase") then lines[#lines + 1] = ("%s = %s"):format(esc(v.Name), esc(v.Value)) end
+    end)
+end -- end info block
+
+----------------------------------------------------------------------
+-- SAVE / LOAD CONFIG
+----------------------------------------------------------------------
+local webhookBox, menuKeyBtn, stamKeyBtn, cfgStatus
+local themeRefresh = function() end
+
+local function updateKeyLabels()
+    if menuKeyBtn then menuKeyBtn.Text = ("Menu key: %s (click to change)"):format(CONFIG.ToggleKey.Name) end
+    if stamKeyBtn then
+        stamKeyBtn.Text = Drink.key and ("Stamina keybind: %s (click to change)"):format(Drink.key.Name)
+            or "Stamina keybind: none (click to set)"
+    end
+end
+
+local function collectConfig()
+    local data = { version = 3, settings = {}, toggles = {}, sliders = {}, farm = {}, webhook = webhookUrl }
+    for k, v in pairs(S) do data.settings[k] = v end
+    for name, o in pairs(toggleReg) do data.toggles[name] = o.State end
+    for name, o in pairs(sliderReg) do data.sliders[name] = o.Value end
+    data.farm = { tool = RevFarm.tool, body = RevFarm.body, custom = RevFarm.customList }
+    return data
+end
+
+local function applySaved(data, restoreFeatures)
+    if type(data) ~= "table" then return end
+    if type(data.settings) == "table" then
+        for k, v in pairs(data.settings) do
+            if S[k] ~= nil and type(S[k]) == type(v) then
+                S[k] = v
+                local o = settingsReg[k]
+                if o then
+                    if o.Kind == "slider" then o:Set(v) else o:Set(v, true) end
+                end
             end
         end
-        lines[#lines + 1] = '<font color="#ff8a8a">-- character attributes --</font>'
-        if ch then lines[#lines + 1] = attrText(ch) end
-        if h then
-            lines[#lines + 1] = '<font color="#ff8a8a">-- humanoid attributes --</font>'
-            lines[#lines + 1] = attrText(h)
-        end
-        localLabel.Text = table.concat(lines, "\n")
-
-        local ci = {}
-        for k in pairs(currentKeepalive) do ci[#ci+1] = '<font color="#6ab0ff">'..esc(k)..'</font>' end
-        for k, v in pairs(numCurrentKeepalive) do ci[#ci+1] = '<font color="#ffcc4d">'..esc(k)..'='..tostring(v)..'</font>' end
-        currentsLabel.Text = #ci > 0 and table.concat(ci, "  ") or '<font color="#888888">none</font>'
-
-        task.wait(1)
     end
-end)
+    do
+        local ok, k = pcall(function() return Enum.KeyCode[S.ToggleKey] end)
+        if ok and k then CONFIG.ToggleKey = k end
+        Drink.key = nil
+        if S.StaminaKey ~= "" then
+            local ok2, k2 = pcall(function() return Enum.KeyCode[S.StaminaKey] end)
+            if ok2 and k2 then Drink.key = k2 end
+        end
+    end
+    if type(data.webhook) == "string" then
+        webhookUrl = data.webhook
+        if webhookBox then webhookBox.Text = webhookUrl end
+    end
+    if type(data.farm) == "table" then
+        if type(data.farm.custom) == "table" then
+            for _, n in ipairs(data.farm.custom) do
+                if type(n) == "string" and n ~= "" then RevFarm.addToolRow(n, false, true) end
+            end
+        end
+        if type(data.farm.tool) == "string" and data.farm.tool ~= "" then RevFarm.selectTool(data.farm.tool) end
+        if type(data.farm.body) == "string" then RevFarm.setBody(data.farm.body) end
+    end
+    if restoreFeatures then
+        if type(data.sliders) == "table" then
+            for name, v in pairs(data.sliders) do
+                local o = sliderReg[name]
+                if o and type(v) == "number" then o:Set(v) end
+            end
+        end
+        if type(data.toggles) == "table" then
+            for name, v in pairs(data.toggles) do
+                local o = toggleReg[name]
+                if o and type(v) == "boolean" then o:Set(v, true) end
+            end
+        end
+    end
+    setTheme(S.Theme)
+    applyLook()
+    updateKeyLabels()
+    themeRefresh()
+end
+
+local function refreshCfgStatus()
+    if not cfgStatus then return end
+    if not canSave then
+        cfgStatus.Text = '<font color="#ff8a8a">Your executor has no file functions — saving is unavailable.</font>'
+        return
+    end
+    local exists = false
+    pcall(function() exists = ENV.isfile(CONFIG.ConfigFile) end)
+    cfgStatus.Text = ("File: %s\nSaved config: %s"):format(CONFIG.ConfigFile, exists and "found" or "none yet")
+end
+
+local function saveConfig(silent)
+    if not canSave then
+        if not silent then notify("Your executor can't write files, so saving isn't available.", "error") end
+        return false
+    end
+    local ok, err = pcall(function()
+        ENV.writefile(CONFIG.ConfigFile, HttpService:JSONEncode(collectConfig()))
+    end)
+    if not silent then
+        if ok then notify("Configuration saved", "success") else notify("Save failed: " .. esc(tostring(err)), "error") end
+    end
+    refreshCfgStatus()
+    return ok
+end
+
+local function loadConfigFromDisk()
+    if not canSave then notify("Your executor can't read files, so loading isn't available.", "error") return end
+    local ok, data = pcall(function()
+        if ENV.isfile(CONFIG.ConfigFile) then
+            return HttpService:JSONDecode(ENV.readfile(CONFIG.ConfigFile))
+        end
+    end)
+    if ok and type(data) == "table" then
+        applySaved(data, true)
+        notify("Configuration loaded", "success")
+    else
+        notify("No saved configuration found", "warn")
+    end
+end
+
+local function resetConfigFile()
+    if canSave and ENV.delfile and ENV.isfile(CONFIG.ConfigFile) then
+        pcall(ENV.delfile, CONFIG.ConfigFile)
+        notify("Saved configuration deleted", "warn")
+    else
+        notify("Nothing to delete", "neutral")
+    end
+    refreshCfgStatus()
+end
 
 ----------------------------------------------------------------------
--- SETTINGS
+-- SETTINGS TAB
 ----------------------------------------------------------------------
-addSection(subs.Settings, "Discord Webhook")
-addTextbox(subs.Settings, "https://discord.com/api/webhooks/...", function(t)
-    webhookUrl = t:gsub("%s+", "")
-    if webhookUrl ~= "" then notify("Webhook URL saved", T.on) end
-end)
-addToggle(subs.Settings, "Use Webhook", false, function(v) flags.Webhook = v end)
-addToggle(subs.Settings, "Notify on Revenant events", true, function(v) flags.WebhookRev = v end)
-addButton(subs.Settings, "Send test message", function()
-    sendWebhook("Revenant Debug — test ping", {
-        { name = "Status", value = "Online", inline = true },
-        { name = "Server", value = game.JobId ~= "" and game.JobId:sub(1,20) or "Studio", inline = true },
-    }, 0x46C86E, true)
-    notify("Test webhook sent", T.on)
-end)
+do -- settings block
+    local st = miscSubs.Settings
 
-addSection(subs.Settings, "Pseudo Infinite Stamina Keybind")
-do
-    local keyBtn
-    keyBtn = addButton(subs.Settings, "Keybind: none (click to set)", function()
-        Drink.binding = true
-        keyBtn.Text = "Press a key... (Esc clears)"
+    addSection(st, "Configuration")
+    addButton(st, "Save configuration", function() saveConfig(false) end)
+    addButton(st, "Load saved configuration", function() loadConfigFromDisk() end)
+    addButton(st, "Delete saved configuration", function() resetConfigFile() end)
+    addToggle(st, "Auto-save when closing the menu", S.AutoSave, function(v) S.AutoSave = v end, { setting = "AutoSave" })
+    addToggle(st, "Restore saved toggles & sliders on start", S.RestoreToggles, function(v) S.RestoreToggles = v end, { setting = "RestoreToggles" })
+    cfgStatus = addLabel(st, "")
+    refreshCfgStatus()
+
+    addSection(st, "Appearance")
+    do
+        local grid = new("Frame", { Size = UDim2.new(1, 0, 0, 68), BackgroundTransparency = 1, LayoutOrder = nextLO(), Parent = st }, {
+            new("UIGridLayout", {
+                CellSize = UDim2.new(0.3333, -4, 0, 30), CellPadding = UDim2.fromOffset(6, 6),
+                SortOrder = Enum.SortOrder.LayoutOrder,
+            }),
+        })
+        local themeBtns = {}
+        for i, name in ipairs(THEME_ORDER) do
+            local b = new("TextButton", {
+                BackgroundColor3 = THEMES[name].accent, Text = name, TextColor3 = Color3.new(1, 1, 1),
+                Font = Enum.Font.GothamBold, TextSize = 12, LayoutOrder = i, Parent = grid,
+            }, { corner(6) })
+            b:SetAttribute("NoTheme", true)
+            themeBtns[name] = b
+            track(b.Activated:Connect(function()
+                setTheme(name)
+                themeRefresh()
+                notify("Theme: " .. name, "info")
+            end))
+        end
+        themeRefresh = function()
+            for name, b in pairs(themeBtns) do
+                b.Text = (name == S.Theme) and ("● " .. name) or name
+            end
+        end
+        themeRefresh()
+    end
+
+    local transSlider
+    transSlider = addSlider(st, "Window transparency", 0, 60, S.Transparency, function(v)
+        S.Transparency = v
+        transSlider.Label.Text = ("Window transparency: %d%%"):format(v)
+        applyLook()
+    end, { setting = "Transparency" })
+    transSlider.Label.Text = ("Window transparency: %d%%"):format(S.Transparency)
+
+    local scaleSlider
+    scaleSlider = addSlider(st, "UI scale", 70, 130, S.Scale, function(v)
+        S.Scale = v
+        scaleSlider.Label.Text = ("UI scale: %d%%"):format(v)
+        applyLook()
+    end, { setting = "Scale" })
+    scaleSlider.Label.Text = ("UI scale: %d%%"):format(S.Scale)
+
+    addToggle(st, "Show loading screen on start", S.ShowLoading, function(v) S.ShowLoading = v end, { setting = "ShowLoading" })
+
+    addSection(st, "Notifications")
+    addToggle(st, "Disable all notifications", S.NotifOff, function(v) S.NotifOff = v end, { setting = "NotifOff" })
+    local durSlider
+    durSlider = addSlider(st, "Duration", 1, 10, S.NotifDuration, function(v)
+        S.NotifDuration = v
+        durSlider.Label.Text = ("Notification duration: %d s"):format(v)
+    end, { setting = "NotifDuration" })
+    durSlider.Label.Text = ("Notification duration: %d s"):format(S.NotifDuration)
+    addButton(st, "Preview notification styles", function()
+        notify("Success — something worked", "success")
+        task.wait(0.15)
+        notify("Info — just so you know", "info")
+        task.wait(0.15)
+        notify("Farm — golden scrap collected", "farm")
+        task.wait(0.15)
+        notify("Warning — heads up", "warn")
+        task.wait(0.15)
+        notify("Error — something failed", "error")
+        task.wait(0.15)
+        notify("Neutral — feature disabled", "neutral")
     end)
 
-    track(UserInputService.InputBegan:Connect(function(i, gp)
-        if Drink.binding then
-            if i.UserInputType ~= Enum.UserInputType.Keyboard then return end
-            Drink.binding = false
+    addSection(st, "Keybinds")
+    menuKeyBtn = addButton(st, "", function()
+        bindMode = "menu"
+        menuKeyBtn.Text = "Press a key... (Esc cancels)"
+    end)
+    stamKeyBtn = addButton(st, "", function()
+        bindMode = "stamina"
+        stamKeyBtn.Text = "Press a key... (Esc clears)"
+    end)
+    updateKeyLabels()
+
+    addSection(st, "Discord Webhook")
+    webhookBox = addTextbox(st, "https://discord.com/api/webhooks/...", function(t)
+        webhookUrl = (t:gsub("%s+", ""))
+        if webhookUrl ~= "" then notify("Webhook URL saved (use Save configuration to keep it)", "success") end
+    end)
+    webhookBox.Text = webhookUrl
+    addToggle(st, "Use Webhook", false, function(v) flags.Webhook = v end)
+    addToggle(st, "Notify on Revenant events", true, function(v) flags.WebhookRev = v end)
+    addButton(st, "Send test message", function()
+        sendWebhook("Revenant HappyMod — test ping", {
+            { name = "Status", value = "Online", inline = true },
+            { name = "Server", value = game.JobId ~= "" and game.JobId:sub(1, 20) or "Studio", inline = true },
+        }, 0x46C86E, true)
+        notify("Test webhook sent", "info")
+    end)
+
+    addSection(st, "UI")
+    addLabel(st, "Drag the title bar to move, drag the corner grip to resize.\nThe menu key hides/shows the window (notifications stay visible).")
+
+    addSection(st, "Current Exploit Tools")
+    addButton(st, "Flush all injected currents", function()
+        for name in pairs(table.clone(currentKeepalive)) do manageCurrent(name, false) end
+        for name in pairs(table.clone(numCurrentKeepalive)) do manageNumCurrent(name, 0, false) end
+        notify("All injected currents flushed", "warn")
+    end)
+    addButton(st, "Dump Currents to console", function()
+        local cur = getCurrentsFolder()
+        if not cur then print("[RD] Currents folder not found") return end
+        print("[RD] === Currents ===")
+        for _, v in ipairs(cur:GetChildren()) do
+            print(("[RD]  %s (%s) = %s"):format(v.Name, v.ClassName, tostring(v:IsA("ValueBase") and v.Value or "?")))
+        end
+        notify("Currents dumped to console", "info")
+    end)
+end -- end settings block
+
+track(UserInputService.InputBegan:Connect(function(i, gp)
+    if bindMode then
+        if i.UserInputType ~= Enum.UserInputType.Keyboard then return end
+        local mode = bindMode
+        bindMode = nil
+        bindDone = tick()
+        if mode == "stamina" then
             if i.KeyCode == Enum.KeyCode.Escape then
-                Drink.key = nil
-                keyBtn.Text = "Keybind: none (click to set)"
+                Drink.key, S.StaminaKey = nil, ""
             elseif i.KeyCode == CONFIG.ToggleKey then
-                keyBtn.Text = ("%s hides the panel, pick another key"):format(CONFIG.ToggleKey.Name)
+                notify(CONFIG.ToggleKey.Name .. " already hides the menu, pick another key", "warn")
             else
-                Drink.key = i.KeyCode
-                keyBtn.Text = ("Keybind: %s (click to change)"):format(i.KeyCode.Name)
-                notify("Stamina keybind set: " .. i.KeyCode.Name, T.blue)
+                Drink.key, S.StaminaKey = i.KeyCode, i.KeyCode.Name
+                notify("Stamina keybind set: " .. i.KeyCode.Name, "info")
             end
-            return
+        else
+            if i.KeyCode == Enum.KeyCode.Escape then
+                -- cancelled
+            elseif i.KeyCode == Drink.key then
+                notify(i.KeyCode.Name .. " is used by the stamina keybind, pick another key", "warn")
+            else
+                CONFIG.ToggleKey, S.ToggleKey = i.KeyCode, i.KeyCode.Name
+                notify("Menu key set: " .. i.KeyCode.Name, "info")
+            end
         end
-        if not gp and Drink.key and i.KeyCode == Drink.key and Drink.toggle then
-            Drink.toggle:Set(not Drink.toggle.State)
-        end
-    end))
-end
-
-addSection(subs.Settings, "UI")
-addLabel(subs.Settings, ("Hide/show key: %s\nDrag the title bar to move, drag the corner grip to resize."):format(CONFIG.ToggleKey.Name))
-
-addSection(subs.Settings, "Current Exploit Tools")
-addButton(subs.Settings, "Flush all injected currents", function()
-    for name in pairs(table.clone(currentKeepalive)) do
-        manageCurrent(name, false)
+        updateKeyLabels()
+        return
     end
-    for name in pairs(table.clone(numCurrentKeepalive)) do
-        manageNumCurrent(name, 0, false)
+    if not gp and Drink.key and i.KeyCode == Drink.key and Drink.toggle then
+        Drink.toggle:Set(not Drink.toggle.State)
     end
-    notify("All injected currents flushed", T.accent)
-end)
-addButton(subs.Settings, "Dump Currents to console", function()
-    local cur = getCurrentsFolder()
-    if not cur then print("[RD] Currents folder not found") return end
-    print("[RD] === Currents ===")
-    for _, v in ipairs(cur:GetChildren()) do
-        print(("[RD]  %s (%s) = %s"):format(v.Name, v.ClassName, tostring(v:IsA("ValueBase") and v.Value or "?")))
-    end
-    notify("Currents dumped to console", T.blue)
-end)
+end))
 
-----------------------------------------------------------------------
--- LOTTERY PAGE  (read-only info)
-----------------------------------------------------------------------
 local lotteryPage = addTab("Lottery", true)
 addSection(lotteryPage, "Lottery — Disabled")
 addLabel(lotteryPage, '<font color="#888888">Auto Lottery has been removed.\nOperate the lottery machines manually.</font>')
 
-----------------------------------------------------------------------
--- CLOSE
-----------------------------------------------------------------------
 local function closeAll()
     if not alive then return end
+    if S.AutoSave and canSave and loadingDone then pcall(saveConfig, true) end
     alive = false
-    for _, t in ipairs(toggles) do pcall(function() t:Set(false) end) end
+    for _, t in ipairs(toggles) do pcall(function() t:Set(false, true) end) end
     table.clear(flags)
     for name in pairs(table.clone(currentKeepalive)) do
-        table.clear(currentKeepalive)
+        currentKeepalive[name] = nil
         removeCurrent(name)
     end
     for name in pairs(table.clone(numCurrentKeepalive)) do
-        table.clear(numCurrentKeepalive)
+        numCurrentKeepalive[name] = nil
         removeNumCurrent(name)
     end
-    restorePowerStationPrompts()
     restorePromptHolds()
     releaseCamera()
     pcall(function() RunService:UnbindFromRenderStep("RevFarmCam") end)
@@ -2488,9 +2740,84 @@ local function closeAll()
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     if gui then gui:Destroy() end
     _G.__RevenantDebugClose = nil
+    _G.__HappyMod_Drink = nil
 end
 _G.__RevenantDebugClose = closeAll
 track(closeBtn.Activated:Connect(closeAll))
 
 selectTab("NPCs")
-print("[RevenantDebug] v2 Loaded.")
+
+local function fadeOut(root, t)
+    local ti = TweenInfo.new(t, Enum.EasingStyle.Quad)
+    for _, d in ipairs(root:GetDescendants()) do
+        local props = {}
+        if d:IsA("GuiObject") then props.BackgroundTransparency = 1 end
+        if d:IsA("TextLabel") or d:IsA("TextButton") then props.TextTransparency = 1 end
+        if d:IsA("UIStroke") then props.Transparency = 1 end
+        if next(props) then TweenService:Create(d, ti, props):Play() end
+    end
+    TweenService:Create(root, ti, { BackgroundTransparency = 1 }):Play()
+    task.wait(t + 0.05)
+    root:Destroy()
+end
+
+local function runStartup()
+    local steps = {
+        { "Hooking services...", function() task.wait() end },
+        { "Waiting for your character...", function()
+            local t0 = tick()
+            while alive and not getHRP() and tick() - t0 < 6 do task.wait(0.1) end
+        end },
+        { "Scanning for revenants...", function() rescanRevenants() end },
+        { "Indexing golden scraps...", function() getGolden(true) end },
+        { "Restoring your saved config...", function() applySaved(Saved, S.RestoreToggles) end },
+        { "Almost done..", function() task.wait(0.2) end },
+        { "Done.", function() end },
+    }
+
+    if not loadUI then
+        for _, st_ in ipairs(steps) do pcall(st_[2]) end
+        return
+    end
+
+    local skip = false
+    track(loadUI.frame.Activated:Connect(function() skip = true end))
+    local shown, target = 0, 0
+
+    local function pump(dur)
+        local t0 = tick()
+        repeat
+            local dt = RunService.Heartbeat:Wait()
+            shown += (target - shown) * math.min(1, dt * 8)
+            loadUI.fill.Size = UDim2.fromScale(shown, 1)
+            loadUI.pct.Text = ("%d%%"):format(math.floor(shown * 100 + 0.5))
+            loadUI.grad.Offset = Vector2.new(math.sin(tick() * 2) * 0.4, 0)
+        until skip or tick() - t0 >= dur or not alive
+    end
+
+    for i, st_ in ipairs(steps) do
+        if not alive then return end
+        loadUI.status.Text = st_[1]
+        target = i / #steps
+        local done = false
+        task.spawn(function() pcall(st_[2]) done = true end)
+        local t0 = tick()
+        repeat pump(0.03) until (done and (skip or tick() - t0 >= 0.3)) or not alive
+    end
+    target = 1
+    pump(0.25)
+    if alive then fadeOut(loadUI.frame, 0.35) end
+end
+
+task.spawn(function()
+    local ok, err = pcall(runStartup)
+    if not ok then warn("[cheatmenu] startup error: " .. tostring(err)) end
+    if not alive then return end
+    if loadUI and loadUI.frame and loadUI.frame.Parent then loadUI.frame:Destroy() end
+    win.Visible = true
+    loadingDone = true
+    applyLook()
+    notify(("Welcome to TRS Cheat Menu [PRIVATE VERSION]. Press %s to hide / show the menu."):format(CONFIG.ToggleKey.Name), "info")
+end)
+
+print("cheat menu v1 loaded.")
