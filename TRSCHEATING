@@ -1,11 +1,3 @@
---[[
-    THE REVENANT: Sunrisen [BETA]  |  PlaceId 93531785397649
-    Debug panel: NPCs / Farming (Scrap + Auto Farm Revenant) / Teleport / Player / Lottery / Misc
-
-    Run as a LocalScript (StarterPlayerScripts) or from your executor.
-    RightShift = hide/show the panel.
-]]
-
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -13,52 +5,36 @@ local LogService       = game:GetService("LogService")
 local HttpService      = game:GetService("HttpService")
 local Stats            = game:GetService("Stats")
 local CoreGui          = game:GetService("CoreGui")
+local TweenService     = game:GetService("TweenService")
 
 local LP  = Players.LocalPlayer
 local ENV = getfenv()
 
-----------------------------------------------------------------------
--- CONFIG (adjust anything the game names differently)
-----------------------------------------------------------------------
 local CONFIG = {
     PlaceId = 93531785397649,
 
     RevenantNameMatch = { "revenant" },
-    MatchAnyNPC = false, -- true = treat EVERY non-player Humanoid model as a revenant
+    MatchAnyNPC = false,
 
     ScrapAttribute = "ForcedClass",
-    ScrapTypes = { "Golden", "Cursed" },  -- types the ESP can show
-    FarmTypes  = { "Golden" },            -- types the auto farm is allowed to collect (Cursed = downed, never farm it)
-    ScrapExtraHold = 3,                   -- extra seconds to keep holding the prompt (on top of its HoldDuration)
+    ScrapTypes = { "Golden", "Cursed" },
+    FarmTypes  = { "Golden" },
+    ScrapExtraHold = 0,          -- hold duration forced to 0 for prompts
+    ScrapHoldOverride = 0,       -- set proximity prompt HoldDuration to this
 
-    -- Scrap carry limit (Farming > Scrap Farming > Scrap Limit)
-    ScrapCounterMatch = "scrap",          -- name used to find the scrap counter (value, folder or attribute)
+    ScrapCounterMatch = "Scraps",
     ScrapMaxDefault = 5,
-    ScrapMaxLimit = 50,                   -- top of the slider (raise it if gamepasses go higher)
+    ScrapMaxLimit = 9,
 
-    -- Lottery
-    LotteryNames = { "Machine1", "Machine2" },
-    LotteryInterval = 1.15,
-    LotteryDisabledTimeout = 4,      -- prompt disabled longer than this -> switch to the next machine
-    LotteryTicketMatch = "ticket",   -- any Tool whose name contains this counts as a ticket
-    LotteryTicketWait = 3,           -- seconds to wait for the ticket to show up after firing the machine
-    LotteryTeleportCooldown = 3,     -- min seconds between teleports to a machine
-    LotteryWinMatch = { "you won", "jackpot", "winner", "congrat" }, -- text that means "you won" (lowercase)
-    LotteryWinWindow = 12,           -- a win text only counts this many seconds after a fire/activation
-
-    -- Teleport tab (all searched recursively in workspace by name)
     ShopPos1Name = "ShopPart",
     ShopPos2Name = "ShopPart2",
     PowerStationName = "PowerStation",
-    -- names tried (in order) for the core part inside the PowerStation model, then any part containing "core"
     PowerStationCoreNames = { "PowerStationCore", "Power Station Core", "Core" },
 
-    -- NPCs tab: auto attack
-    AutoAttackRange = 12,     -- studs to the nearest revenant before swinging
-    AutoAttackInterval = 0.12, -- seconds between swing attempts (the tool's own cooldown still applies)
+    AutoAttackRange = 7,
+    AutoAttackInterval = 0.12,
 
-    -- Farming > Auto Farm Revenant
-    RevenantTools = {          -- preselected weapons (rec = shows the RECOMMENDED tag)
+    RevenantTools = {
         { name = "Ocaso" },
         { name = "LAZARUS", rec = true },
         { name = "ENDBRINGER" },
@@ -68,24 +44,23 @@ local CONFIG = {
         { name = "Ivory-Periastron" },
     },
     RevFarmDefaultTool = "LAZARUS",
-    RevFarmDistance = 6,       -- studs between you and the revenant's target part (slider in the UI)
-    RevFarmYOffset = -1.5,     -- HumanoidRootPart height relative to the target part (-1.5 puts your eyes at head height)
+    RevFarmDistance = 6,
+    RevFarmYOffset = 1.5,
 
-    -- Player tab
-    HazardNames = { "BarbedWire", "RagdollPart" }, -- instances the "Remove hazards" toggle un-parents (reversible)
-    SpeedCloneName = "Speed_COOLCHEATING",         -- must keep the "Speed_" prefix
-    SpeedLimit = 150,                              -- max amount (stored value goes down to -SpeedLimit)
-    PowerStationHold = 0.05, -- HoldDuration forced on the PowerStation prompt(s)
+    HazardNames = { "BarbedWire", "RagdollPart" },
+    SpeedCloneName = "Speed_COOLCHEATING",
+    SpeedLimit = 150,
+    PowerStationHold = 0.05,
 
-    TeleportOffset = Vector3.new(0, 3, 0), -- offset added on top of the target when teleporting
-    ScrapRetryCooldown = 8,                -- seconds before retrying a scrap that didn't get collected
+    TeleportOffset = Vector3.new(0, 3, 0),
+    ScrapRetryCooldown = 8,
     ToggleKey = Enum.KeyCode.RightShift,
     MaxConsoleLines = 250,
+
+    -- Rage Spell current names to remove
+    RageSpellFOVCurrent   = { "RageFOV", "RageFov", "FOVRage", "SpellFOV", "RageSpellFOV" },
 }
 
-----------------------------------------------------------------------
--- Single instance guard
-----------------------------------------------------------------------
 if _G.__RevenantDebugClose then pcall(_G.__RevenantDebugClose) end
 
 if game.PlaceId ~= CONFIG.PlaceId then
@@ -135,8 +110,6 @@ local function teleportTo(cf)
     if hrp then hrp.CFrame = cf + CONFIG.TeleportOffset end
 end
 
--- Looks inside the instance first, then climbs up to 4 ancestors (scraps are
--- MeshParts inside a Model inside a Part, so the prompt may live higher up).
 local function findPrompt(inst, stopAt)
     local cur = inst
     for _ = 0, 4 do
@@ -170,7 +143,6 @@ local function promptAvailable(p)
     return p ~= nil and p.Parent ~= nil and p.Enabled and p:IsDescendantOf(workspace)
 end
 
--- Camera helpers (used while holding a scrap prompt) --------------------
 local function aimCamera(target)
     local cam = workspace.CurrentCamera
     local hrp = getHRP()
@@ -198,14 +170,144 @@ local function attrText(inst)
     return table.concat(out, "\n")
 end
 
+local function getCharData(char)
+    local cd = game:GetService("ReplicatedStorage"):FindFirstChild("CharacterData")
+    local c = char or LP.Character or LP
+    if not cd then return nil end
+    local byName = cd:FindFirstChild(c.Name)
+    if byName then return byName end
+    if c.FindFirstChild then return c:FindFirstChild("CharData") end
+    return nil
+end
+
+local function getCurrentsFolder()
+    local cd = getCharData()
+    if not cd then return nil end
+    local ps = cd:FindFirstChild("PlayerStuff")
+    return ps and ps:FindFirstChild("Currents")
+end
+
+local injectedCurrents = {}
+
+local function injectCurrent(name)
+    if injectedCurrents[name] and injectedCurrents[name].Parent then return injectedCurrents[name] end
+    local cur = getCurrentsFolder()
+    if not cur then return nil end
+    local template
+    for _, v in ipairs(cur:GetChildren()) do
+        if v:IsA("BoolValue") then template = v break end
+    end
+    if not template then
+        template = Instance.new("BoolValue")
+        template.Name = "__rdtmp"
+        template.Value = true
+        template.Parent = cur
+    end
+    local cl = template:Clone()
+    if cl.Name == "__rdtmp" then template:Destroy() end
+    cl.Name = name
+    cl.Value = true
+    cl.Parent = cur
+    injectedCurrents[name] = cl
+    return cl
+end
+
+local function removeCurrent(name)
+    local inst = injectedCurrents[name]
+    if inst and inst.Parent then
+        pcall(function() inst:Destroy() end)
+    end
+    injectedCurrents[name] = nil
+    local cur = getCurrentsFolder()
+    if cur then
+        for _, v in ipairs(cur:GetChildren()) do
+            if v.Name == name then pcall(function() v:Destroy() end) end
+        end
+    end
+end
+
+local injectedNumCurrents = {}
+local function injectNumCurrent(name, value, folder)
+    local cur = folder or getCurrentsFolder()
+    if not cur then return nil end
+    if injectedNumCurrents[name] and injectedNumCurrents[name].Parent then
+        injectedNumCurrents[name].Value = value
+        return injectedNumCurrents[name]
+    end
+    local template
+    for _, v in ipairs(cur:GetChildren()) do
+        if v:IsA("NumberValue") then template = v break end
+    end
+    if not template then
+        template = Instance.new("NumberValue")
+        template.Name = "__rdntmp"
+        template.Parent = cur
+    end
+    local cl = template:Clone()
+    if cl.Name == "__rdntmp" then template:Destroy() end
+    cl.Name = name
+    cl.Value = value
+    cl.Parent = cur
+    injectedNumCurrents[name] = cl
+    return cl
+end
+
+local function removeNumCurrent(name)
+    local inst = injectedNumCurrents[name]
+    if inst and inst.Parent then pcall(function() inst:Destroy() end) end
+    injectedNumCurrents[name] = nil
+    local cur = getCurrentsFolder()
+    if cur then
+        for _, v in ipairs(cur:GetChildren()) do
+            if v.Name == name then pcall(function() v:Destroy() end) end
+        end
+    end
+end
+
+local currentKeepalive = {}
+local numCurrentKeepalive = {}
+track(RunService.Heartbeat:Connect(function()
+    for name in pairs(currentKeepalive) do
+        if not (injectedCurrents[name] and injectedCurrents[name].Parent) then
+            injectCurrent(name)
+        end
+    end
+    for name, val in pairs(numCurrentKeepalive) do
+        if not (injectedNumCurrents[name] and injectedNumCurrents[name].Parent) then
+            injectNumCurrent(name, val)
+        end
+    end
+end))
+
+local function manageCurrent(name, enabled)
+    if enabled then
+        currentKeepalive[name] = true
+        injectCurrent(name)
+    else
+        currentKeepalive[name] = nil
+        removeCurrent(name)
+    end
+end
+
+local function manageNumCurrent(name, value, enabled)
+    if enabled then
+        numCurrentKeepalive[name] = value
+        injectNumCurrent(name, value)
+    else
+        numCurrentKeepalive[name] = nil
+        removeNumCurrent(name)
+    end
+end
+
 ----------------------------------------------------------------------
--- Theme / GUI root
+-- UI THEME
 ----------------------------------------------------------------------
 local T = {
     bg = Color3.fromRGB(22, 22, 28), top = Color3.fromRGB(32, 32, 40), side = Color3.fromRGB(27, 27, 34),
     row = Color3.fromRGB(38, 38, 48), accent = Color3.fromRGB(205, 50, 60),
     text = Color3.fromRGB(232, 232, 238), dim = Color3.fromRGB(150, 150, 162),
     on = Color3.fromRGB(70, 200, 110), off = Color3.fromRGB(72, 72, 86),
+    blue = Color3.fromRGB(80, 140, 220), purple = Color3.fromRGB(140, 80, 220),
 }
 
 local gui = new("ScreenGui", {
@@ -217,8 +319,103 @@ if not okParent or not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui")
 
 local espFolder = new("Folder", { Name = "ESP", Parent = gui })
 
+-- Notification layer sits at top level of the ScreenGui, NOT inside win
+local notifLayer = new("Frame", {
+    Name = "NotifLayer",
+    AnchorPoint = Vector2.new(1, 1),
+    Position = UDim2.new(1, -12, 1, -12),
+    Size = UDim2.fromOffset(280, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    ZIndex = 500,
+    Parent = gui,
+}, {
+    new("UIListLayout", {
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        FillDirection = Enum.FillDirection.Vertical,
+        VerticalAlignment = Enum.VerticalAlignment.Bottom,
+        HorizontalAlignment = Enum.HorizontalAlignment.Right,
+        Padding = UDim.new(0, 6),
+    }),
+})
+
+local notifCounter = 0
+local function notify(message, color)
+    notifCounter += 1
+    local lo = notifCounter
+    color = color or T.accent
+
+    local frame = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = T.top,
+        BackgroundTransparency = 0.05,
+        LayoutOrder = -lo,
+        ZIndex = 500,
+        Parent = notifLayer,
+    }, {
+        corner(6),
+        new("UIStroke", { Color = color, Thickness = 1.2, Transparency = 0.3 }),
+        new("UIPadding", {
+            PaddingTop = UDim.new(0, 8),
+            PaddingBottom = UDim.new(0, 8),
+            PaddingLeft = UDim.new(0, 10),
+            PaddingRight = UDim.new(0, 10),
+        }),
+    })
+
+    local accent = new("Frame", {
+        Size = UDim2.new(0, 3, 1, 0),
+        Position = UDim2.fromOffset(0, 0),
+        BackgroundColor3 = color,
+        ZIndex = 501,
+        Parent = frame,
+    }, { corner(3) })
+
+    local lbl = new("TextLabel", {
+        Position = UDim2.fromOffset(10, 0),
+        Size = UDim2.new(1, -14, 1, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        Text = message,
+        TextColor3 = T.text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 12,
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        RichText = true,
+        ZIndex = 501,
+        Parent = frame,
+    })
+
+    -- tap to dismiss
+    local hitbox = new("TextButton", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Text = "",
+        ZIndex = 502,
+        Parent = frame,
+    })
+
+    local dismissed = false
+    local function dismiss()
+        if dismissed then return end
+        dismissed = true
+        local ti = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        local tw = TweenService:Create(frame, ti, { BackgroundTransparency = 1 })
+        TweenService:Create(lbl, ti, { TextTransparency = 1 }):Play()
+        TweenService:Create(accent, ti, { BackgroundTransparency = 1 }):Play()
+        tw:Play()
+        tw.Completed:Connect(function() pcall(function() frame:Destroy() end) end)
+    end
+
+    track(hitbox.Activated:Connect(dismiss))
+
+    task.delay(4, dismiss)
+end
+
 local win = new("Frame", {
-    Name = "Window", Size = UDim2.fromOffset(560, 390), Position = UDim2.new(0.5, -280, 0.5, -195),
+    Name = "Window", Size = UDim2.fromOffset(580, 420), Position = UDim2.new(0.5, -290, 0.5, -210),
     BackgroundColor3 = T.bg, BorderSizePixel = 0, ClipsDescendants = true, Parent = gui,
 }, { corner(8), new("UIStroke", { Color = Color3.fromRGB(60, 60, 74), Thickness = 1 }) })
 
@@ -252,7 +449,6 @@ local grip = new("TextButton", {
     ZIndex = 20, Parent = win,
 })
 
--- Drag / resize --------------------------------------------------------
 local function dragHandle(handle, onStart, onDelta)
     local active, origin = false, nil
     track(handle.InputBegan:Connect(function(i)
@@ -296,9 +492,6 @@ track(UserInputService.InputBegan:Connect(function(i, gp)
     if not gp and i.KeyCode == CONFIG.ToggleKey then gui.Enabled = not gui.Enabled end
 end))
 
-----------------------------------------------------------------------
--- Widgets
-----------------------------------------------------------------------
 local lo = 0
 local function nextLO() lo += 1 return lo end
 
@@ -315,6 +508,14 @@ end
 local function addSection(parent, text)
     return new("TextLabel", {
         Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = string.upper(text), TextColor3 = T.accent,
+        Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = nextLO(), Parent = parent,
+    })
+end
+
+local function addSectionColored(parent, text, color)
+    return new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = string.upper(text), TextColor3 = color or T.accent,
         Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = nextLO(), Parent = parent,
     })
@@ -345,10 +546,11 @@ local function addToggle(parent, text, default, cb)
             local ok, err = pcall(cb, v)
             if not ok then warn("[RevenantDebug] toggle '" .. text .. "' error: " .. tostring(err)) end
         end)
+        notify((v and "✓ Enabled: " or "✗ Disabled: ") .. text, v and T.on or T.dim)
     end
     track(btn.Activated:Connect(function() obj:Set(not obj.State) end))
     toggles[#toggles + 1] = obj
-    if default then obj:Set(true) end
+    if default then task.defer(function() obj:Set(true) end) end
     return obj
 end
 
@@ -380,7 +582,7 @@ local function addTextbox(parent, placeholder, cb)
     return tb
 end
 
--- Help popup (used by the "?" buttons) ---------------------------------
+-- Help popup (inside win, but above everything)
 local helpPopup = new("Frame", {
     AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(320, 190),
     BackgroundColor3 = T.top, Visible = false, Active = true, ZIndex = 30, Parent = win,
@@ -416,7 +618,6 @@ local function addSectionHelp(parent, text, help)
     return row
 end
 
--- Slider (integer values, can be locked) --------------------------------
 local function addSlider(parent, text, min, max, default, cb)
     local holder = new("Frame", { Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = T.row, LayoutOrder = nextLO(), Parent = parent }, { corner(6) })
     local lbl = new("TextLabel", {
@@ -465,7 +666,6 @@ local function addSlider(parent, text, min, max, default, cb)
     return obj
 end
 
--- Tabs ----------------------------------------------------------------
 local pages, tabButtons = {}, {}
 local function selectTab(name)
     for n, p in pairs(pages) do p.Visible = (n == name) end
@@ -511,44 +711,46 @@ local function addSubTabs(page, names, btnWidth)
 end
 
 ----------------------------------------------------------------------
--- Webhook
+-- WEBHOOK  (no username mentions)
 ----------------------------------------------------------------------
 local webhookUrl = ""
 local httpRequest = ENV.request or ENV.http_request or (ENV.syn and ENV.syn.request) or (ENV.http and ENV.http.request)
 
 local function sendWebhook(title, fields, color, force)
     if not force and not flags.Webhook then return end
-    if webhookUrl == "" then warn("[RevenantDebug] Webhook URL is empty.") return end
+    if webhookUrl == "" then return end
     local body = HttpService:JSONEncode({
         username = "Revenant Debug",
         embeds = {{ title = title, color = color or 0xCD323C, fields = fields or {}, timestamp = DateTime.now():ToIsoDate() }},
     })
     if httpRequest then
-        local ok, err = pcall(httpRequest, { Url = webhookUrl, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = body })
-        if not ok then warn("[RevenantDebug] Webhook failed: " .. tostring(err)) end
+        pcall(httpRequest, { Url = webhookUrl, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = body })
     else
-        local ok, err = pcall(function() return HttpService:PostAsync(webhookUrl, body) end)
-        if not ok then warn("[RevenantDebug] No request() available and HttpService failed (client can't use PostAsync): " .. tostring(err)) end
+        pcall(function() HttpService:PostAsync(webhookUrl, body) end)
     end
 end
 
 ----------------------------------------------------------------------
--- Category 1: NPCs (Revenants)
+-- NPC PAGE
 ----------------------------------------------------------------------
 local npcPage = addTab("NPCs", true)
-local revenants = {}          -- [model] = true
-local revESP = {}             -- [model] = {bb=, hl=}
+local revenants = {}
+local revESP = {}
 local selectedModel, cycleIdx = nil, 0
 
--- shared state of Farming > Auto Farm Revenant (UI is built further down)
 local RevFarm = {
     tool = CONFIG.RevFarmDefaultTool, head = true, body = "Torso", dist = CONFIG.RevFarmDistance,
     camAim = true, camHeld = false, rows = {}, custom = {}, target = nil, kills = 0, status = nil, toggle = nil,
+    -- resilience tracking
+    lastSwingAt = 0,
+    lastTargetId = nil,
+    stuckTimer = 0,
+    reEquipCooldown = 0,
 }
 
-local revHum = {}                                        -- [model] = Humanoid
-local revDeathSent = setmetatable({}, { __mode = "k" })  -- [model] = true once the death was reported
-local revDiedConn = {}                                   -- [model] = Died connection
+local revHum = {}
+local revDeathSent = setmetatable({}, { __mode = "k" })
+local revDiedConn = {}
 
 local function nameMatches(inst)
     local n = inst.Name:lower()
@@ -569,23 +771,27 @@ local function isRevenant(m)
     return CONFIG.MatchAnyNPC
 end
 
--- Revenant death: counts the kill and sends the webhook message --------
+local function reportRevEvent(title, m, extraFields, color)
+    if not flags.WebhookRev then return end
+    local part = partOf(m)
+    local pos = part and part.Position or Vector3.zero
+    local fields = {
+        { name = "Revenant", value = tostring(m and m.Name or "Unknown"), inline = true },
+        { name = "Kill #", value = tostring(RevFarm.kills), inline = true },
+        { name = "Position", value = ("%d, %d, %d"):format(pos.X, pos.Y, pos.Z), inline = true },
+        { name = "Server", value = game.JobId ~= "" and game.JobId:sub(1, 20) or "Studio", inline = true },
+    }
+    for _, f in ipairs(extraFields or {}) do fields[#fields+1] = f end
+    task.spawn(sendWebhook, title, fields, color or 0xCD323C)
+end
+
 local function reportRevDeath(m)
     if revDeathSent[m] then return end
     revDeathSent[m] = true
-    local farming = flags.RevFarm == true
-    if farming then RevFarm.kills += 1 end
-    if not flags.WebhookRev then return end
-
-    local part = partOf(m)
-    local pos = part and part.Position or Vector3.zero
-    task.spawn(sendWebhook, "Revenant died", {
-        { name = "Revenant", value = tostring(m.Name), inline = true },
-        { name = "Player", value = LP.Name, inline = true },
-        { name = "Auto Farm", value = farming and ("ON (%s)"):format(tostring(RevFarm.tool)) or "OFF", inline = true },
-        { name = "Auto farm kills (session)", value = tostring(RevFarm.kills), inline = true },
-        { name = "Position", value = ("%d, %d, %d"):format(pos.X, pos.Y, pos.Z) },
-        { name = "JobId", value = game.JobId ~= "" and game.JobId or "Studio" },
+    RevFarm.kills += 1
+    reportRevEvent("Revenant Killed", m, {
+        { name = "Farming", value = flags.RevFarm and ("ON — Tool: " .. tostring(RevFarm.tool)) or "OFF", inline = true },
+        { name = "Session Kills", value = tostring(RevFarm.kills) },
     }, 0xCD323C)
 end
 
@@ -600,7 +806,7 @@ end
 
 local function dropRevenant(m)
     local h = revHum[m]
-    if h and h.Health <= 0 then reportRevDeath(m) end -- died and got removed before Died was seen
+    if h and h.Health <= 0 then reportRevDeath(m) end
     revenants[m] = nil
     revHum[m] = nil
     local c = revDiedConn[m]
@@ -665,13 +871,12 @@ addButton(npcPage, "Teleport to revenant", function()
     local part = partOf(target)
     if part then
         teleportTo(part.CFrame)
+        notify("Teleported to revenant: " .. (target and target.Name or "?"), T.blue)
     else
-        targetBtn.Text = "Target: none found"
+        notify("No revenant found to teleport to", T.accent)
     end
 end)
--- Auto attack (normal swings only) --------------------------------------
--- Fires the equipped tool's own Activated/Deactivated connections, exactly like a click.
--- Deactivated fires ~0.05s later, so Mouse1Down is never held long enough to start a charged attack.
+
 local function fireSignal(signal, fallback)
     local fired = false
     if ENV.getconnections then
@@ -708,11 +913,11 @@ autoStatus = addLabel(npcPage, "Idle")
 
 task.spawn(function()
     while alive do
-        if flags.AutoAttack and not flags.RevFarm then -- Auto Farm Revenant has its own swing loop
+        if flags.AutoAttack and not flags.RevFarm then
             local hrp = getHRP()
             local ch = LP.Character
             local tool = ch and ch:FindFirstChildOfClass("Tool")
-            local tp = partOf(sortedRevenants(true)[1]) -- nearest living revenant
+            local tp = partOf(sortedRevenants(true)[1])
             if not hrp or not tool then
                 autoStatus.Text = "No weapon equipped"
             elseif not tp then
@@ -788,7 +993,6 @@ task.spawn(function()
             end
         end
 
-        -- stats
         local arr = sortedRevenants()
         if selectedModel and not selectedModel:IsDescendantOf(workspace) then selectedModel, cycleIdx = nil, 0 end
         local target = selectedModel or arr[1]
@@ -811,23 +1015,22 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------------
--- Shared state between Lottery and Scrap Farming + scrap counter
+-- SHARED
 ----------------------------------------------------------------------
 local Shared = {
-    lotteryReady = false, -- true while the lottery has at least one usable machine (it then has priority)
-    farmBusy = false,     -- true while the scrap farm is mid-collection (lottery waits for it to let go)
+    farmBusy = false,
 }
-
--- Hook for the auto sell feature (called once when the scrap limit is reached, right after teleporting to the shop)
 Shared.autoSell = function() end
 
+----------------------------------------------------------------------
+-- SCRAP COUNTER
+----------------------------------------------------------------------
 local Cap = { enabled = true, max = CONFIG.ScrapMaxDefault, inst = nil, get = nil, desc = nil, nextScan = 0 }
 
 local function isScrapName(n)
     return n:lower():find(CONFIG.ScrapCounterMatch, 1, true) ~= nil
 end
 
--- Number value -> its value. Folder/Configuration -> amount of children (one child per scrap).
 local function readCounter(inst)
     if inst:IsA("ValueBase") then
         local v = inst.Value
@@ -839,8 +1042,6 @@ local function readCounter(inst)
     return nil
 end
 
--- Searches the usual places: leaderstats, CharacterData[you].PlayerStuff (where Currents lives),
--- CharacterData[you], then the Player itself (attributes included). Returns inst, getter, description.
 local function findScrapCounter()
     local cd = game:GetService("ReplicatedStorage"):FindFirstChild("CharacterData")
     local mine = cd and cd:FindFirstChild(LP.Name)
@@ -875,7 +1076,7 @@ local function getScrapCount()
 end
 
 ----------------------------------------------------------------------
--- Category 2: Game / Farming  (sub tabs: Scrap Farming / Auto Farm Revenant)
+-- FARMING PAGE
 ----------------------------------------------------------------------
 local farmPage = addTab("Farming", false)
 local farmSubs = addSubTabs(farmPage, { "Scrap Farming", "Auto Farm Revenant" }, 140)
@@ -887,6 +1088,24 @@ for _, name in ipairs(CONFIG.FarmTypes) do scrapEnabled[name] = true end
 local scrapColors = { Golden = Color3.fromRGB(248, 186, 0), Cursed = Color3.fromRGB(255, 0, 0) }
 local scrapCooldown = {}
 local scrapESP = {}
+local promptHoldOverrides = {}   -- [prompt] = originalHoldDuration
+
+local function restorePromptHolds()
+    for p, orig in pairs(promptHoldOverrides) do
+        if p and p.Parent then
+            pcall(function() p.HoldDuration = orig end)
+        end
+    end
+    table.clear(promptHoldOverrides)
+end
+
+local function zeroPromptHold(prompt)
+    if not prompt or not prompt.Parent then return end
+    if promptHoldOverrides[prompt] == nil then
+        promptHoldOverrides[prompt] = prompt.HoldDuration
+    end
+    pcall(function() prompt.HoldDuration = CONFIG.ScrapHoldOverride end)
+end
 
 local function scrapTypeOf(inst)
     local t = inst:GetAttribute(CONFIG.ScrapAttribute)
@@ -909,7 +1128,6 @@ local function scanScraps()
         if d:IsA("BasePart") then
             local t = scrapTypeOf(d)
             if t then
-                -- several MeshParts of one scrap share a prompt: count the scrap once
                 local prompt = findPrompt(d, root)
                 if not prompt or not seenPrompt[prompt] then
                     if prompt then seenPrompt[prompt] = true end
@@ -926,12 +1144,13 @@ local function scrapAvailable(inst)
     return promptAvailable(findPrompt(inst, scrapsRoot()))
 end
 
-addSection(scrapPage, "Scrap Farming (Golden only)")
+addSection(scrapPage, "Scrap Farming (Golden only — instant pickup)")
 local farmStatus
 addToggle(scrapPage, "Scrap Farming", false, function(v)
     flags.Farm = v
     if not v then
         releaseCamera()
+        restorePromptHolds()
         Shared.farmBusy = false
         if farmStatus then farmStatus.Text = "Idle" end
     end
@@ -950,7 +1169,7 @@ addButton(scrapPage, "Rescan scrap counter", function()
     Cap.inst, Cap.nextScan = nil, 0
     local n = getScrapCount()
     capStatus.Text = n and ("Found: %s = %d"):format(tostring(Cap.desc), n) or "Scrap counter not found"
-    print("[RevenantDebug] Scrap counter: " .. tostring(Cap.desc or "not found"))
+    notify("Scrap counter: " .. (Cap.desc or "not found"), T.blue)
 end)
 
 addSection(scrapPage, "ESP")
@@ -959,18 +1178,14 @@ addSection(scrapPage, "Status")
 farmStatus = addLabel(scrapPage, "Idle")
 
 task.spawn(function()
-    local fullHandled = false -- already went to the shop for this "full" episode
+    local fullHandled = false
     while alive do
         if flags.Farm then
             local hrp = getHRP()
             if not hrp then
                 farmStatus.Text = "Waiting for character..."
                 task.wait(0.5)
-            elseif flags.Lottery and Shared.lotteryReady then
-                farmStatus.Text = "Paused: lottery has priority"
-                task.wait(0.25)
             else
-                -- scrap limit ---------------------------------------------------
                 local count = getScrapCount()
                 if count then
                     capStatus.Text = ("Scraps: %d / %d\nSource: %s"):format(count, Cap.max, tostring(Cap.desc))
@@ -982,19 +1197,19 @@ task.spawn(function()
                     if not fullHandled then
                         fullHandled = true
                         farmStatus.Text = "Scrap limit reached, going to shop..."
+                        notify("Scrap limit reached — heading to shop", T.on)
                         local sp = partOf(workspace:FindFirstChild(CONFIG.ShopPos1Name, true))
                         if sp then teleportTo(sp.CFrame) end
                         task.wait(0.3)
                         pcall(Shared.autoSell)
                     end
-                    farmStatus.Text = ("Full (%d/%d) - at shop, waiting for sell..."):format(count, Cap.max)
+                    farmStatus.Text = ("Full (%d/%d) — at shop, waiting for sell..."):format(count, Cap.max)
                     task.wait(0.5)
                 else
                     fullHandled = false
 
                     local best, bestDist
                     for _, s in ipairs(scanScraps()) do
-                        -- only Golden is ever considered (Cursed downs you)
                         if s.type == "Golden" and scrapEnabled[s.type] and scrapAvailable(s.inst) and (scrapCooldown[s.inst] or 0) < tick() then
                             local p = partOf(s.inst)
                             if p then
@@ -1012,45 +1227,52 @@ task.spawn(function()
                             local scrapPart = partOf(inst)
                             local lookAt = scrapPart and scrapPart.Position or cf.Position
 
+                            -- Zero out hold duration for instant pickup
+                            zeroPromptHold(prompt)
+
                             Shared.farmBusy = true
                             farmStatus.Text = ("Collecting %s..."):format(best.type)
                             teleportTo(cf)
-                            task.wait(0.15)
+                            task.wait(0.12)
                             aimCamera(lookAt)
 
-                            -- press + hold the prompt for its HoldDuration plus a few extra seconds,
-                            -- keeping the camera locked on the scrap the whole time
-                            local holdTime = (prompt.HoldDuration or 0) + CONFIG.ScrapExtraHold
-                            pcall(firePrompt, prompt)
-                            pcall(function() prompt:InputHoldBegin() end)
-                            local t0 = tick()
-                            repeat
+                            -- Fire prompt (hold duration is 0 so it's instant)
+                            local ok = pcall(firePrompt, prompt)
+                            if not ok then
+                                pcall(function() prompt:InputHoldBegin() end)
                                 task.wait(0.1)
-                                local h = getHRP()
-                                if h and (h.Position - cf.Position).Magnitude > 8 then
-                                    teleportTo(cf) -- got pushed away, snap back
+                                pcall(function() prompt:InputHoldEnd() end)
+                            end
+
+                            -- Wait briefly to confirm pickup
+                            local t0 = tick()
+                            local pickupConfirmed = false
+                            repeat
+                                task.wait(0.08)
+                                if not scrapAvailable(inst) then
+                                    pickupConfirmed = true
                                 end
-                                aimCamera(lookAt)
-                                farmStatus.Text = ("Holding %s (%.1fs / %.1fs)"):format(best.type, tick() - t0, holdTime)
-                            until not flags.Farm or not scrapAvailable(inst) or tick() - t0 > holdTime
-                                or (flags.Lottery and Shared.lotteryReady) -- the lottery wants its turn
-                            pcall(function() prompt:InputHoldEnd() end)
+                                -- re-anchor if drifted
+                                local h2 = getHRP()
+                                if h2 and (h2.Position - cf.Position).Magnitude > 8 then
+                                    teleportTo(cf)
+                                end
+                            until pickupConfirmed or tick() - t0 > 3 or not flags.Farm
+
                             releaseCamera()
                             Shared.farmBusy = false
 
-                            if flags.Lottery and Shared.lotteryReady and scrapAvailable(inst) then
-                                farmStatus.Text = "Interrupted by lottery"
-                            elseif not scrapAvailable(inst) then
-                                farmStatus.Text = ("Collected %s, waiting for respawn..."):format(best.type)
+                            if pickupConfirmed then
+                                farmStatus.Text = ("Collected Golden — waiting for respawn..."):format()
                                 local pos = cf.Position
-                                sendWebhook("Scrap collected: " .. best.type, {
-                                    { name = "Type", value = best.type, inline = true },
-                                    { name = "Player", value = LP.Name, inline = true },
+                                sendWebhook("Scrap collected: Golden", {
+                                    { name = "Type", value = "Golden", inline = true },
                                     { name = "Position", value = ("%d, %d, %d"):format(pos.X, pos.Y, pos.Z) },
-                                    { name = "JobId", value = game.JobId ~= "" and game.JobId or "Studio" },
+                                    { name = "Server", value = game.JobId ~= "" and game.JobId:sub(1,20) or "Studio" },
                                 }, 0xFFC828)
                             else
                                 scrapCooldown[inst] = tick() + CONFIG.ScrapRetryCooldown
+                                farmStatus.Text = "Pickup timed out, cooling down..."
                             end
                         else
                             scrapCooldown[inst] = tick() + CONFIG.ScrapRetryCooldown
@@ -1107,16 +1329,10 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------------
--- Farming > Auto Farm Revenant
--- Equips the chosen weapon, keeps teleporting you in front of the revenant's
--- head (or Torso / HumanoidRootPart when head aim is off), looks at it and
--- swings constantly. Every revenant death is sent to the Discord webhook
--- (Misc > Settings).
+-- AUTO FARM REVENANT  (improved resilience)
 ----------------------------------------------------------------------
 do
     local function normName(s) return (tostring(s):lower():gsub("[^%w]", "")) end
-
-    -- the part we aim at
     local function revPartFor(m)
         if not m then return nil end
         if RevFarm.head then
@@ -1129,7 +1345,6 @@ do
             or m:FindFirstChild("HumanoidRootPart") or partOf(m)
     end
 
-    -- exact (normalized) name match in hand or backpack; custom names also accept a partial match
     local function findFarmTool()
         local want = normName(RevFarm.tool)
         if want == "" then return nil end
@@ -1154,6 +1369,23 @@ do
         if tool then fireSignal(tool.Deactivated, function() tool:Deactivate() end) end
     end
 
+    local function stopAnimations()
+        -- Stop all animation tracks on the humanoid/animator to suppress attack anims
+        local ch = LP.Character
+        if not ch then return end
+        local hum = ch:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+        local animator = hum:FindFirstChildOfClass("Animator")
+        if animator then
+            local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+            if ok and tracks then
+                for _, track in ipairs(tracks) do
+                    pcall(function() track:Stop(0) end)
+                end
+            end
+        end
+    end
+
     local function releaseRevCamera()
         if RevFarm.camHeld then
             RevFarm.camHeld = false
@@ -1161,15 +1393,20 @@ do
         end
     end
 
-    ---------------- UI ----------------
     addSection(revPage, "Auto Farm Revenant")
     RevFarm.toggle = addToggle(revPage, "Auto Farm Revenant", false, function(v)
         flags.RevFarm = v
         if not v then
             RevFarm.target = nil
+            RevFarm.stuckTimer = 0
             releaseRevCamera()
             pcall(stopSwing)
             if RevFarm.status then RevFarm.status.Text = "Idle" end
+            reportRevEvent("Farm Stopped", nil, {{ name = "Session Kills", value = tostring(RevFarm.kills) }}, 0x888888)
+        else
+            RevFarm.kills = 0
+            notify("Auto Farm Revenant started — tool: " .. RevFarm.tool, T.on)
+            reportRevEvent("Farm Started", nil, {{ name = "Tool", value = RevFarm.tool, inline = true }}, 0x46C86E)
         end
     end)
     RevFarm.status = addLabel(revPage, "Idle")
@@ -1179,9 +1416,7 @@ do
         "",
         "Recommended: LAZARUS, Dragon Slayer, Azure Endbringer.",
         "",
-        "Not in the list? Type the exact tool name in the box below the list and press Enter. It gets added and selected.",
-        "",
-        "Revenant deaths are sent to your Discord webhook (Misc > Settings, needs 'Use Webhook' on).",
+        "Not in the list? Type the exact tool name in the box below the list and press Enter.",
     }, "\n"))
 
     local toolHolder = new("Frame", {
@@ -1241,6 +1476,7 @@ do
         if not name or name == "" then return end
         addToolRow(name, false, true)
         selectTool(name)
+        notify("Custom tool added: " .. name, T.blue)
     end)
 
     addSection(revPage, "Aim")
@@ -1249,6 +1485,7 @@ do
     bodyBtn = addButton(revPage, "Body target (head aim off): Torso", function()
         RevFarm.body = (RevFarm.body == "Torso") and "HumanoidRootPart" or "Torso"
         bodyBtn.Text = ("Body target (head aim off): %s"):format(RevFarm.body)
+        notify("Body target: " .. RevFarm.body, T.blue)
     end)
     addToggle(revPage, "Face target + lock camera", true, function(v)
         RevFarm.camAim = v
@@ -1261,7 +1498,13 @@ do
     end)
     distSlider.Label.Text = ("Distance: %d studs"):format(RevFarm.dist)
 
-    ---------------- teleport: stay in front of the target part, looking at it ----------------
+    addSection(revPage, "Kill Count")
+    local killBtn = addButton(revPage, "Reset kill counter", function()
+        RevFarm.kills = 0
+        notify("Kill counter reset", T.dim)
+    end)
+
+    -- Position lock heartbeat
     track(RunService.Heartbeat:Connect(function()
         if not flags.RevFarm then return end
         local hrp = getHRP()
@@ -1281,7 +1524,7 @@ do
         hrp.AssemblyAngularVelocity = Vector3.zero
     end))
 
-    ---------------- camera: look straight at the target part ----------------
+    -- Camera lock render step
     local function camStep()
         if not flags.RevFarm or not RevFarm.camAim then return end
         local cam = workspace.CurrentCamera
@@ -1299,55 +1542,92 @@ do
     pcall(function() RunService:UnbindFromRenderStep("RevFarmCam") end)
     RunService:BindToRenderStep("RevFarmCam", Enum.RenderPriority.Camera.Value + 10, camStep)
 
-    ---------------- main loop: pick target, equip, swing ----------------
+    -- Main farm loop (resilient night-grind version)
     task.spawn(function()
+        local SWING_INTERVAL     = CONFIG.AutoAttackInterval
+        local EQUIP_RETRY_DELAY  = 1.5
+        local STUCK_THRESHOLD    = 8   -- seconds without a valid target before notifying
+        local lastNotifyStuck    = 0
+
         while alive do
-            if flags.RevFarm then
+            if not flags.RevFarm then
+                task.wait(0.3)
+            else
                 local ch = LP.Character
                 local hum = ch and ch:FindFirstChildOfClass("Humanoid")
                 local hrp = getHRP()
-                RevFarm.target = sortedRevenants(true)[1] -- nearest living revenant
 
+                -- Character not ready
                 if not (hum and hrp and hum.Health > 0) then
-                    RevFarm.status.Text = "Waiting for character..."
+                    RevFarm.status.Text = "Waiting for character to respawn..."
+                    RevFarm.target = nil
                     task.wait(0.5)
                 else
+                    -- Tool management
                     local tool = findFarmTool()
                     if not tool then
-                        RevFarm.status.Text = ('<font color="#ff5a5a">Tool "%s" not found (hand or backpack)</font>'):format(esc(RevFarm.tool))
-                        task.wait(0.5)
+                        RevFarm.status.Text = ('<font color="#ff5a5a">Tool "%s" not found in hand/backpack</font>'):format(esc(RevFarm.tool))
+                        task.wait(EQUIP_RETRY_DELAY)
                     elseif tool.Parent ~= ch then
                         RevFarm.status.Text = "Equipping " .. tool.Name
-                        pcall(function() hum:EquipTool(tool) end)
-                        task.wait(0.3)
+                        local ok = pcall(function() hum:EquipTool(tool) end)
+                        if not ok then
+                            -- try unequip current first then re-equip
+                            local current = ch:FindFirstChildOfClass("Tool")
+                            if current then pcall(function() hum:UnequipTools() end) task.wait(0.1) end
+                            pcall(function() hum:EquipTool(tool) end)
+                        end
+                        task.wait(0.35)
                     else
+                        -- Tool is equipped — find target
+                        RevFarm.target = sortedRevenants(true)[1]
                         local m = RevFarm.target
                         local part = revPartFor(m)
-                        if not part then
-                            RevFarm.status.Text = ("No revenant alive, waiting... (kills: %d)"):format(RevFarm.kills)
+
+                        if not (m and part) then
+                            RevFarm.stuckTimer += SWING_INTERVAL
+                            if RevFarm.stuckTimer > STUCK_THRESHOLD then
+                                if tick() - lastNotifyStuck > 30 then
+                                    lastNotifyStuck = tick()
+                                    notify("No revenant found — waiting for spawn...", T.dim)
+                                    reportRevEvent("Waiting for Revenant Spawn", nil, {
+                                        { name = "Session Kills", value = tostring(RevFarm.kills) },
+                                    }, 0x888888)
+                                end
+                            end
+                            RevFarm.status.Text = ("No revenant alive — waiting for spawn... (kills: %d)"):format(RevFarm.kills)
                             task.wait(0.25)
                         else
+                            RevFarm.stuckTimer = 0
                             local dist = (part.Position - hrp.Position).Magnitude
+
+                            -- Swing if in range (position lock in Heartbeat handles the movement)
                             if dist <= RevFarm.dist + 8 then
                                 fireSignal(tool.Activated, function() tool:Activate() end)
                                 task.wait(0.05)
                                 fireSignal(tool.Deactivated, function() tool:Deactivate() end)
+                                RevFarm.lastSwingAt = tick()
+                                -- suppress attack animations to reduce visual noise / potential detections
+                                stopAnimations()
                             end
-                            RevFarm.status.Text = ("%s -> %s (%d studs)\nTool: %s | kills: %d"):format(
-                                esc(m.Name), esc(part.Name), math.floor(dist), esc(tool.Name), RevFarm.kills)
-                            task.wait(CONFIG.AutoAttackInterval)
+
+                            local hum2 = m:FindFirstChildOfClass("Humanoid")
+                            local hp = hum2 and math.floor(hum2.Health) or 0
+                            local maxHp = hum2 and math.floor(hum2.MaxHealth) or 0
+                            RevFarm.status.Text = ("%s → %s | HP %d/%d | %d studs\nTool: %s | kills: %d"):format(
+                                esc(m.Name), esc(part.Name), hp, maxHp, math.floor(dist), esc(tool.Name), RevFarm.kills)
+
+                            task.wait(SWING_INTERVAL)
                         end
                     end
                 end
-            else
-                task.wait(0.3)
             end
         end
     end)
 end
 
 ----------------------------------------------------------------------
--- Shared: PowerStation lookup (recursive)
+-- POWER STATION
 ----------------------------------------------------------------------
 local function findPowerStation()
     return workspace:FindFirstChild(CONFIG.PowerStationName, true)
@@ -1378,7 +1658,7 @@ local function powerStationPrompts()
 end
 
 ----------------------------------------------------------------------
--- Category 3: Teleport
+-- TELEPORT PAGE
 ----------------------------------------------------------------------
 local tpPage = addTab("Teleport", true)
 
@@ -1400,8 +1680,10 @@ local function addTeleportButton(label, finder)
         if cf then
             teleportTo(cf)
             tpStatus.Text = ("Teleported to %s"):format(label)
+            notify("Teleported → " .. label, T.blue)
         else
             tpStatus.Text = ('<font color="#ff5a5a">%s not found</font>'):format(esc(label))
+            notify(label .. " not found", T.accent)
         end
     end)
 end
@@ -1413,10 +1695,10 @@ addSection(tpPage, "Status")
 tpStatus = addLabel(tpPage, "Idle")
 
 ----------------------------------------------------------------------
--- Category 4: Player
+-- PLAYER PAGE
 ----------------------------------------------------------------------
 local playerPage = addTab("Player", true)
-local psOriginalHold = {}   -- [prompt] = original HoldDuration
+local psOriginalHold = {}
 local psStatus
 
 local function restorePowerStationPrompts()
@@ -1436,7 +1718,7 @@ addToggle(playerPage, "Instant Fix Power Station", false, function(v)
 end)
 addButton(playerPage, "Fix Power Station now (teleport + fire)", function()
     local prompts, ps = powerStationPrompts()
-    if not ps then psStatus.Text = '<font color="#ff5a5a">PowerStation model not found</font>' return end
+    if not ps then psStatus.Text = '<font color="#ff5a5a">PowerStation model not found</font>' notify("PowerStation not found", T.accent) return end
     local prompt
     for _, p in ipairs(prompts) do
         if promptAvailable(p) then prompt = p break end
@@ -1448,6 +1730,7 @@ addButton(playerPage, "Fix Power Station now (teleport + fire)", function()
     if cf then teleportTo(cf) task.wait(0.15) end
     firePrompt(prompt)
     psStatus.Text = "Fired PowerStation prompt"
+    notify("Power Station fixed!", T.on)
 end)
 addSection(playerPage, "Status")
 psStatus = addLabel(playerPage, "Idle")
@@ -1475,11 +1758,11 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------------
--- Player: remove hazards (reversible)
+-- WORLD HAZARDS
 ----------------------------------------------------------------------
 addSection(playerPage, "World")
 local hazardStatus
-local hazardRemoved = {}   -- array of { inst =, parent = } in removal order
+local hazardRemoved = {}
 local hazardConn
 
 local function isHazard(inst)
@@ -1494,7 +1777,7 @@ local function removeHazard(inst)
     pcall(function()
         if inst.Parent == nil then return end
         hazardRemoved[#hazardRemoved + 1] = { inst = inst, parent = inst.Parent }
-        inst.Parent = nil -- kept alive by the table above, so it can be restored
+        inst.Parent = nil
     end)
 end
 
@@ -1509,7 +1792,7 @@ addToggle(playerPage, "Remove Barbed Wire & Ragdoll Parts", false, function(v)
         end)
     else
         if hazardConn then hazardConn:Disconnect() hazardConn = nil end
-        for i = #hazardRemoved, 1, -1 do -- reverse order so nested ones go back inside their parents
+        for i = #hazardRemoved, 1, -1 do
             local r = hazardRemoved[i]
             pcall(function() r.inst.Parent = r.parent end)
         end
@@ -1529,7 +1812,142 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------------
--- Player: speed helper
+-- MOVEMENT / COMBAT
+----------------------------------------------------------------------
+addSectionColored(playerPage, "Movement", T.blue)
+
+local movExploitStatus = addLabel(playerPage, "All off")
+
+local function refreshMovStatus()
+    local active = {}
+    local map = {
+        NoAntiSprint  = "No AntiSprint",
+        NoAntiJump    = "No AntiJump",
+        NoAntiCrouch  = "No AntiCrouch",
+        InfStamina    = "Inf Stamina",
+        NoAntiLand    = "AntiLand",
+        AntiConcuss   = "Anti-Concuss",
+        AntiStun      = "Anti-Stun",
+        AntiBleed     = "Anti-Bleed",
+        AntiFlash     = "Anti-Flash",
+    }
+    for k, label in pairs(map) do
+        if flags["mex_"..k] then active[#active+1] = label end
+    end
+    movExploitStatus.Text = #active > 0 and table.concat(active, ", ") or "All off"
+end
+
+addToggle(playerPage, "No AntiSprint (can always sprint)", false, function(v)
+    flags.mex_NoAntiSprint = v
+    refreshMovStatus()
+end)
+
+addToggle(playerPage, "No AntiJump (can always jump)", false, function(v)
+    flags.mex_NoAntiJump = v
+    refreshMovStatus()
+end)
+
+-- Anti-jump and anti-crouch destruction loop
+task.spawn(function()
+    while alive do
+        if flags.mex_NoAntiJump or flags.mex_NoAntiCrouch then
+            local cur = getCurrentsFolder()
+            if cur then
+                for _, v in ipairs(cur:GetChildren()) do
+                    if flags.mex_NoAntiJump and v.Name == "AntiJump" and not injectedCurrents["AntiJump"] then
+                        pcall(function() v:Destroy() end)
+                    end
+                    if flags.mex_NoAntiCrouch and v.Name == "AntiCrouch" and not injectedCurrents["AntiCrouch"] then
+                        pcall(function() v:Destroy() end)
+                    end
+                end
+            end
+        end
+        task.wait(0.1)
+    end
+end)
+
+addToggle(playerPage, "No AntiCrouch (can always crouch)", false, function(v)
+    flags.mex_NoAntiCrouch = v
+    refreshMovStatus()
+end)
+
+-- AntiLand: inject the AntiLand boolean (gives you the buff instead of removing it)
+addToggle(playerPage, "Give AntiLand (no landing penalty)", false, function(v)
+    flags.mex_NoAntiLand = v
+    manageCurrent("AntiLand", v)
+    refreshMovStatus()
+end)
+
+addSectionColored(playerPage, "Combat", T.purple)
+
+addToggle(playerPage, "Anti-Concuss (no concuss effect)", false, function(v)
+    flags.mex_AntiConcuss = v
+    manageCurrent("AntiConcuss", v)
+    refreshMovStatus()
+end)
+
+addToggle(playerPage, "Anti-Stun (destroy Stunned current)", false, function(v)
+    flags.mex_AntiStun = v
+    refreshMovStatus()
+end)
+
+task.spawn(function()
+    while alive do
+        if flags.mex_AntiStun then
+            local cur = getCurrentsFolder()
+            if cur then
+                for _, v in ipairs(cur:GetChildren()) do
+                    if v.Name == "Stunned" then pcall(function() v:Destroy() end) end
+                end
+            end
+        end
+        task.wait(0.08)
+    end
+end)
+
+addToggle(playerPage, "Anti-Bleed (destroy Bleeding current)", false, function(v)
+    flags.mex_AntiBleed = v
+    refreshMovStatus()
+end)
+
+task.spawn(function()
+    while alive do
+        if flags.mex_AntiBleed then
+            local cur = getCurrentsFolder()
+            if cur then
+                for _, v in ipairs(cur:GetChildren()) do
+                    if v.Name == "Bleeding" then pcall(function() v:Destroy() end) end
+                end
+            end
+        end
+        task.wait(0.08)
+    end
+end)
+
+addToggle(playerPage, "Anti-Flash (destroy flash currents)", false, function(v)
+    flags.mex_AntiFlash = v
+    refreshMovStatus()
+end)
+
+task.spawn(function()
+    while alive do
+        if flags.mex_AntiFlash then
+            local cur = getCurrentsFolder()
+            if cur then
+                for _, v in ipairs(cur:GetChildren()) do
+                    if v.Name == "FlashedPreFade" or v.Name == "SPerc_Flashed" then
+                        pcall(function() v:Destroy() end)
+                    end
+                end
+            end
+        end
+        task.wait(0.05)
+    end
+end)
+
+----------------------------------------------------------------------
+-- SPEED HELPER
 ----------------------------------------------------------------------
 addSectionHelp(playerPage, "Speed Helper", table.concat({
     "1) Turn the helper on.",
@@ -1544,7 +1962,6 @@ local speedAmount, speedSlow = 0, false
 local speedClone, speedUnlocked = nil, false
 local speedStatus, speedModeBtn, speedSlider, speedBox
 
--- Speed up = negative stored value (down to -limit), slow down = positive. The UI never shows the sign.
 local function desiredSpeedValue()
     if speedAmount == 0 then return 0 end
     return speedSlow and speedAmount or -speedAmount
@@ -1572,7 +1989,7 @@ local function lockSpeedUI(locked)
     speedBox.BackgroundTransparency = locked and 0.5 or 0
 end
 
-local function getCurrents()
+local function getCurrents_legacy()
     local cd = game:GetService("ReplicatedStorage"):FindFirstChild("CharacterData")
     local mine = cd and cd:FindFirstChild(LP.Name)
     local stuff = mine and mine:FindFirstChild("PlayerStuff")
@@ -1613,11 +2030,11 @@ lockSpeedUI(true)
 task.spawn(function()
     while alive do
         if flags.Speed then
-            local cur = getCurrents()
+            local cur = getCurrents_legacy()
             if not cur then
                 speedStatus.Text = "Waiting for Currents folder..."
             else
-                if speedClone and speedClone.Parent ~= cur then -- folder was rebuilt (respawn), start over
+                if speedClone and speedClone.Parent ~= cur then
                     speedClone = nil
                     lockSpeedUI(true)
                 end
@@ -1649,37 +2066,140 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------------
--- Player: Energy Drink (permanent)
--- Clones a REAL Energized BoolValue and keeps a copy in Currents forever
--- (also after respawn) while the toggle is on. Strips the drink's other
--- values (slowdowns, FOV) and its drifting color correction.
+-- PSEUDO INFINITE STAMINA  (EnergizedRAGESPELL only)
 ----------------------------------------------------------------------
-addSectionHelp(playerPage, "Energy Drink", table.concat({
-    "How to use:",
-    "1) Drink a REAL energy drink in the game first (the game rejects a value made from nothing).",
-    "2) While its effect is active, turn this toggle on.",
-    "3) The script clones the Energized value and keeps it in your Currents permanently, even after respawn, as long as the toggle stays on.",
+addSectionHelp(playerPage, "Pseudo Infinite Stamina", table.concat({
+    "Injects EnergizedRAGESPELL into your Currents folder.",
+    "On enable:",
+    "• Rage spell animations are stopped.",
+    "• FOV / Speed side-effect currents are removed.",
+    "• The rage spell ColorCorrection (the vision tint/distortion on your camera) is detected by watching it change values rapidly and destroyed automatically.",
     "",
-    "Also removes the drink's other values (anything named Energized / energy drink that isn't the boolean), its FOV, and its color correction.",
-    "Turning it off removes the clone.",
+    "NOTE: Uses the Energy Drink effect — you may occasionally run low on stamina.",
 }, "\n"))
 
-local Drink = { template = nil, inst = nil, name = nil, spawnAt = 0, removed = 0, cc = {}, binding = false, key = nil, toggle = nil, status = nil }
-local live = { cur = nil, max = nil, at = 0 }
+local Drink = {
+    inst = nil, spawnAt = 0, removed = 0,
+    binding = false, key = nil, toggle = nil, status = nil,
+}
 
--- live stamina from the game's own BindableEvent (status display only)
-pcall(function()
-    local ev = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
-    local b = ev and ev:FindFirstChild("StamChange")
-    if b and b:IsA("BindableEvent") then
-        track(b.Event:Connect(function(cur, max) live.cur, live.max, live.at = cur, max, tick() end))
+local function isRageSpellFOV(name)
+    for _, n in ipairs(CONFIG.RageSpellFOVCurrent) do
+        if name:lower() == n:lower() then return true end
     end
-end)
+    return false
+end
 
-local function isDrinkName(n)
-    n = n:lower()
-    return n:find("energized", 1, true) ~= nil or n:find("energy drink", 1, true) ~= nil
-        or n:find("energydrink", 1, true) ~= nil or n:find("energy_drink", 1, true) ~= nil
+local function cleanRageSpellSideEffects(cur)
+    if not cur then return end
+    for _, v in ipairs(cur:GetChildren()) do
+        if isRageSpellFOV(v.Name) or v.Name == "Speed_EnergizedRAGESPELL" then
+            pcall(function() v:Destroy() end)
+            Drink.removed += 1
+        end
+    end
+    -- Also clean PlayerStuff/FOVs if it exists
+    local stuff = cur.Parent
+    if stuff then
+        local fovs = stuff:FindFirstChild("FOVs")
+        if fovs then
+            for _, v in ipairs(fovs:GetChildren()) do
+                if isRageSpellFOV(v.Name) or v.Name:lower():find("rage", 1, true) then
+                    pcall(function() v:Destroy() end)
+                end
+            end
+        end
+    end
+end
+
+-- ColorCorrection killer for the rage spell camera effect.
+-- The rage spell injects a ColorCorrectionEffect into CurrentCamera and
+-- continuously mutates its Brightness/Contrast/Saturation/TintColor every
+-- frame.  We detect any CC that changes two or more of those properties
+-- within a 1-second observation window and destroy it.  A static CC (e.g.
+-- one the game ships permanently) will never hit the change threshold.
+local rageCC = {
+    watched  = {},   -- [ColorCorrectionEffect] = { props snapshot, changeCount, firstSeenAt }
+    removed  = 0,
+}
+
+local function snapCC(cc)
+    return { cc.Brightness, cc.Contrast, cc.Saturation, cc.TintColor }
+end
+
+local function snapshotsDiffer(a, b)
+    return a[1] ~= b[1] or a[2] ~= b[2] or a[3] ~= b[3] or a[4] ~= b[4]
+end
+
+local function killRageColorCorrections()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
+    local now = tick()
+    local seen = {}
+
+    for _, child in ipairs(cam:GetChildren()) do
+        if child:IsA("ColorCorrectionEffect") then
+            seen[child] = true
+            local rec = rageCC.watched[child]
+            if not rec then
+                -- First time we see this CC — record its initial state
+                rageCC.watched[child] = {
+                    snap     = snapCC(child),
+                    changes  = 0,
+                    seenAt   = now,
+                }
+            else
+                local newSnap = snapCC(child)
+                if snapshotsDiffer(rec.snap, newSnap) then
+                    rec.changes += 1
+                    rec.snap = newSnap
+                end
+                -- After 1 second of observation: if it changed ≥2 times it's
+                -- the rage spell CC — nuke it.
+                if now - rec.seenAt >= 1 and rec.changes >= 2 then
+                    pcall(function() child:Destroy() end)
+                    rageCC.watched[child] = nil
+                    rageCC.removed += 1
+                    seen[child] = nil
+                end
+            end
+        end
+    end
+
+    -- Prune entries for CCs that were already destroyed externally
+    for cc in pairs(rageCC.watched) do
+        if not seen[cc] then
+            rageCC.watched[cc] = nil
+        end
+    end
+end
+
+local function injectEnergizedRage()
+    local cur = getCurrents_legacy()
+    if not cur then return nil end
+    -- Check if already injected and alive
+    if Drink.inst and Drink.inst.Parent == cur then
+        Drink.inst.Value = true
+        return Drink.inst
+    end
+    -- Clean stale
+    if Drink.inst then pcall(function() Drink.inst:Destroy() end) Drink.inst = nil end
+    -- Find a BoolValue template
+    local template
+    for _, v in ipairs(cur:GetChildren()) do
+        if v:IsA("BoolValue") and not v:GetAttribute("RD_Clone") then
+            template = v break
+        end
+    end
+    if not template then return nil end
+    local cl = template:Clone()
+    cl.Name = "EnergizedRAGESPELL"
+    cl.Value = true
+    cl:SetAttribute("RD_Clone", true)
+    cl.Parent = cur
+    Drink.inst = cl
+    return cl
 end
 
 local function removeDrinkClone()
@@ -1687,58 +2207,13 @@ local function removeDrinkClone()
     Drink.inst = nil
 end
 
--- deletes every drink-related value that is NOT the boolean (slowdowns, FOV, etc.)
-local function cleanDrinkValues(cur)
-    local function sweep(folder)
-        if not folder then return end
-        for _, c in ipairs(folder:GetChildren()) do
-            if isDrinkName(c.Name) and not c:IsA("BoolValue") then
-                pcall(function() c:Destroy() end)
-                Drink.removed += 1
-            end
-        end
-    end
-    sweep(cur)                                              -- Currents (Speed_/SPerc_ Energized..., any FOV in there)
-    sweep(cur.Parent and cur.Parent:FindFirstChild("FOVs")) -- PlayerStuff.FOVs (the drink's FOV NumberValue)
-end
-
--- the drink's color correction: sits in the camera with the default name and its values keep changing
-local function killDriftingCC()
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    local now, seen = tick(), {}
-    for _, e in ipairs(cam:GetChildren()) do
-        if e:IsA("ColorCorrectionEffect") and e.Name == "ColorCorrection" then
-            seen[e] = true
-            local sig = { e.Brightness, e.Contrast, e.Saturation, e.TintColor }
-            local rec = Drink.cc[e]
-            if not rec then
-                Drink.cc[e] = { t0 = now, sig = sig, changes = 0 }
-            else
-                if rec.sig[1] ~= sig[1] or rec.sig[2] ~= sig[2] or rec.sig[3] ~= sig[3] or rec.sig[4] ~= sig[4] then
-                    rec.changes += 1
-                end
-                rec.sig = sig
-                -- older than 1.5s (skips the 1s damage flash) and still drifting = the drink's effect
-                if now - rec.t0 > 1.5 and rec.changes >= 2 then
-                    pcall(function() e:Destroy() end)
-                    seen[e] = nil
-                end
-            end
-        end
-    end
-    for e in pairs(Drink.cc) do
-        if not seen[e] then Drink.cc[e] = nil end
-    end
-end
-
-Drink.toggle = addToggle(playerPage, "Energy Drink (permanent)", false, function(v)
+Drink.toggle = addToggle(playerPage, "Pseudo Infinite Stamina", false, function(v)
     flags.Drink = v
     if not v then
-        removeDrinkClone() -- game then plays the drink's end effect
-        if Drink.template then pcall(function() Drink.template:Destroy() end) end
-        Drink.template, Drink.name, Drink.removed = nil, nil, 0
-        table.clear(Drink.cc)
+        removeDrinkClone()
+        Drink.removed = 0
+        rageCC.removed = 0
+        table.clear(rageCC.watched)
         if Drink.status then Drink.status.Text = "Idle" end
     end
 end)
@@ -1749,49 +2224,41 @@ track(LP.CharacterAdded:Connect(function() Drink.spawnAt = tick() end))
 task.spawn(function()
     while alive do
         if flags.Drink then
-            local cur = getCurrents()
+            local cur = getCurrents_legacy()
             local ch = LP.Character
             local hum = ch and ch:FindFirstChildOfClass("Humanoid")
 
             if not (cur and hum and hum.Health > 0) then
                 Drink.status.Text = "Waiting for character / Currents folder..."
+            elseif tick() - Drink.spawnAt < 2.5 then
+                Drink.status.Text = "Waiting for character to fully load..."
             else
-                -- 1) grab a template from a REAL drink (once)
-                if not Drink.template then
-                    for _, c in ipairs(cur:GetChildren()) do
-                        if c:IsA("BoolValue") and not c:GetAttribute("RD_Clone") and c.Name:lower():find("energized", 1, true) then
-                            Drink.template = c:Clone()
-                            Drink.name = c.Name
-                            break
+                local inst = injectEnergizedRage()
+                if not inst then
+                    Drink.status.Text = "No BoolValue template in Currents yet — equip a tool and wait..."
+                else
+                    -- Keep it alive
+                    inst.Value = true
+                    -- Stop animations to suppress rage spell visuals
+                    local animator = hum:FindFirstChildOfClass("Animator")
+                    if animator then
+                        local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+                        if ok and tracks then
+                            for _, track in ipairs(tracks) do
+                                if track.Name:lower():find("rage", 1, true) or track.Name:lower():find("spell", 1, true) then
+                                    pcall(function() track:Stop(0) end)
+                                end
+                            end
                         end
                     end
-                end
-
-                if not Drink.template then
-                    Drink.status.Text = "Drink a real energy drink first, then it gets cloned automatically"
-                elseif tick() - Drink.spawnAt < 2.5 then
-                    Drink.status.Text = "Waiting for the game to finish loading your character..."
-                else
-                    -- 2) paste the clone back (also after respawn: Currents gets rebuilt)
-                    if not Drink.inst or Drink.inst.Parent ~= cur then
-                        local cl = Drink.template:Clone()
-                        cl:SetAttribute("RD_Clone", true)
-                        cl.Parent = cur
-                        Drink.inst = cl
-                    end
-                    -- 3) strip slowdowns / FOV of the drink
-                    cleanDrinkValues(cur)
-
-                    local lines = { ("Permanent: %s (removed %d extra value(s))"):format(Drink.name, Drink.removed) }
-                    if live.cur and tick() - live.at < 3 then
-                        lines[#lines + 1] = ("Stamina %d / %d"):format(math.floor(tonumber(live.cur) or 0), math.floor(tonumber(live.max) or 0))
-                    end
-                    Drink.status.Text = table.concat(lines, "\n")
+                    -- Remove side-effect currents (folder entries)
+                    cleanRageSpellSideEffects(cur)
+                    -- Remove the rage spell ColorCorrection from CurrentCamera
+                    killRageColorCorrections()
+                    Drink.status.Text = ("Active: EnergizedRAGESPELL | currents cleaned: %d | CC removed: %d"):format(
+                        Drink.removed, rageCC.removed)
                 end
             end
-
-            -- 4) kill the drifting color correction (runs with or without the clone)
-            pcall(killDriftingCC)
             task.wait(0.25)
         else
             task.wait(0.3)
@@ -1800,254 +2267,8 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------------
--- Category 5: Lottery
--- Loop: teleport once to a machine (only if out of range) -> fire its prompt
--- -> wait for the ticket it gives -> equip + activate it -> repeat.
--- Switches to the next available machine when:
---   * a win is detected, or
---   * the current machine's prompt stays disabled > LotteryDisabledTimeout.
--- While any machine is usable the lottery has PRIORITY over scrap farming;
--- when none is usable, the scrap farm gets its turn.
+-- MISC PAGE
 ----------------------------------------------------------------------
-local lotteryPage = addTab("Lottery", true)
-local lotteryStatus
-local LT = { won = false, lastAction = 0, wins = 0, rounds = 0 }
-
-addSection(lotteryPage, "Lottery")
-addToggle(lotteryPage, "Auto Lottery (priority over scrap farm)", false, function(v)
-    flags.Lottery = v
-    if not v then
-        Shared.lotteryReady = false
-        if lotteryStatus then lotteryStatus.Text = "Idle" end
-    end
-end)
-addSection(lotteryPage, "Status")
-lotteryStatus = addLabel(lotteryPage, "Idle")
-
-local function findMachines()
-    local list = {}
-    for _, name in ipairs(CONFIG.LotteryNames) do
-        local m = workspace:FindFirstChild(name, true)
-        if m then list[#list + 1] = m end
-    end
-    return list
-end
-
-local function machineTrigger(m)
-    local prompt = m:FindFirstChildWhichIsA("ProximityPrompt", true)
-    if prompt then return "prompt", prompt end
-    local cd = m:FindFirstChildWhichIsA("ClickDetector", true)
-    if cd then return "click", cd end
-    return nil
-end
-
-local function machineAvailable(m)
-    if not m:IsDescendantOf(workspace) then return false end
-    local kind, obj = machineTrigger(m)
-    if kind == "prompt" then return promptAvailable(obj) end
-    return kind == "click"
-end
-
--- returns tool, isHeld (any Tool whose name contains LotteryTicketMatch)
-local function findTicket()
-    local want = CONFIG.LotteryTicketMatch:lower()
-    local function scan(container)
-        if not container then return nil end
-        for _, t in ipairs(container:GetChildren()) do
-            if t:IsA("Tool") and t.Name:lower():find(want, 1, true) then return t end
-        end
-        return nil
-    end
-    local held = scan(LP.Character)
-    if held then return held, true end
-    local inBag = scan(LP:FindFirstChildOfClass("Backpack"))
-    if inBag then return inBag, false end
-    return nil, false
-end
-
-local function waitForTicket(timeout)
-    local t0 = tick()
-    repeat
-        local t = findTicket()
-        if t then return t end
-        task.wait(0.05)
-    until tick() - t0 > timeout or not flags.Lottery or not alive
-    return nil
-end
-
-local function equipTicket(t)
-    local ch = LP.Character
-    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-    if not (ch and hum and hum.Health > 0) then return false end
-    if t.Parent == ch then return true end
-    pcall(function() hum:EquipTool(t) end)
-    local t0 = tick()
-    repeat task.wait(0.05) until t.Parent == ch or tick() - t0 > 1
-    return t.Parent == ch
-end
-
--- Win detection -----------------------------------------------------------
--- The script can't know how the game announces a win, so it listens for text
--- that matches CONFIG.LotteryWinMatch (new/changed GUI text + console output)
--- shortly after a fire/activation. Adjust LotteryWinMatch to the real message.
-local function looksLikeWin(text)
-    local t = tostring(text):lower()
-    for _, s in ipairs(CONFIG.LotteryWinMatch) do
-        if t:find(s, 1, true) then return true end
-    end
-    return false
-end
-
-local function onWinSignal(text)
-    if not alive or not flags.Lottery or LT.won then return end
-    if tick() - LT.lastAction > CONFIG.LotteryWinWindow then return end
-    LT.won = true
-    LT.wins += 1
-    sendWebhook("Lottery won", {
-        { name = "Player", value = LP.Name, inline = true },
-        { name = "Message", value = tostring(text):sub(1, 200) },
-        { name = "Wins (session)", value = tostring(LT.wins), inline = true },
-    }, 0x46C86E)
-end
-
-local watchedText = setmetatable({}, { __mode = "k" })
-local function watchText(d, isNew)
-    if watchedText[d] or not (d:IsA("TextLabel") or d:IsA("TextButton")) then return end
-    if d:IsDescendantOf(gui) then return end -- never watch our own panel
-    watchedText[d] = true
-    local function check()
-        if alive and d.Text ~= "" and looksLikeWin(d.Text) then onWinSignal(d.Text) end
-    end
-    d:GetPropertyChangedSignal("Text"):Connect(check)
-    if isNew then check() end
-end
-
-task.spawn(function()
-    local pg = LP:WaitForChild("PlayerGui")
-    for _, d in ipairs(pg:GetDescendants()) do watchText(d, false) end
-    track(pg.DescendantAdded:Connect(function(d) watchText(d, true) end))
-end)
-track(LogService.MessageOut:Connect(function(msg)
-    if looksLikeWin(msg) then onWinSignal(msg) end
-end))
-
--- Main loop ---------------------------------------------------------------
-task.spawn(function()
-    local idx, disabledSince = 1, nil
-    local tpTarget, lastTp = nil, 0
-
-    -- teleports only if out of range, and never more than once per cooldown
-    local function approach(m, cf, reach)
-        local hrp = getHRP()
-        if not (hrp and cf) then return end
-        if (hrp.Position - cf.Position).Magnitude <= reach then return end
-        if tpTarget == m and tick() - lastTp < CONFIG.LotteryTeleportCooldown then return end
-        teleportTo(cf)
-        tpTarget, lastTp = m, tick()
-        task.wait(0.15)
-    end
-
-    local function nextAvailable(machines, from)
-        for step = 1, #machines do
-            local i = ((from - 1 + step) % #machines) + 1
-            if machineAvailable(machines[i]) then return i end
-        end
-        return nil
-    end
-
-    while alive do
-        if not flags.Lottery then
-            Shared.lotteryReady = false
-            disabledSince, tpTarget = nil, nil
-            task.wait(0.3)
-        else
-            local machines = findMachines()
-            if #machines == 0 then
-                Shared.lotteryReady = false
-                lotteryStatus.Text = "No Machine1/Machine2 found"
-                task.wait(1)
-            else
-                if idx > #machines then idx = 1 end
-                local m = machines[idx]
-
-                -- the lottery keeps priority while ANY machine is usable
-                local anyAvail = false
-                for _, mm in ipairs(machines) do
-                    if machineAvailable(mm) then anyAvail = true break end
-                end
-                Shared.lotteryReady = anyAvail
-
-                if LT.won then
-                    LT.won = false
-                    local n = nextAvailable(machines, idx)
-                    if n then idx = n end
-                    disabledSince, tpTarget = nil, nil -- forces a teleport to the new machine
-                    lotteryStatus.Text = ("Won! (%d wins) -> switching to %s"):format(LT.wins, machines[idx].Name)
-                    task.wait(0.3)
-
-                elseif not machineAvailable(m) then
-                    disabledSince = disabledSince or tick()
-                    local waited = tick() - disabledSince
-                    lotteryStatus.Text = ("%s disabled (%.1fs / %ds)%s"):format(
-                        m.Name, waited, CONFIG.LotteryDisabledTimeout, anyAvail and "" or " - none available, scrap farm has the turn")
-                    if waited > CONFIG.LotteryDisabledTimeout then
-                        local n = nextAvailable(machines, idx)
-                        if n then
-                            idx, disabledSince, tpTarget = n, nil, nil
-                        end
-                    end
-                    task.wait(0.2)
-
-                else
-                    disabledSince = nil
-
-                    -- let a running scrap collection release first (it aborts on its own)
-                    local w0 = tick()
-                    while Shared.farmBusy and tick() - w0 < 6 and alive and flags.Lottery do task.wait(0.05) end
-
-                    local kind, obj = machineTrigger(m)
-                    local cf = (kind == "prompt") and promptCFrame(obj, m)
-                        or (partOf(m) and partOf(m).CFrame)
-                    local reach = ((kind == "prompt" and obj.MaxActivationDistance) or 10) - 2
-                    approach(m, cf, reach)
-
-                    -- 1) fire the machine
-                    lotteryStatus.Text = ("Firing %s (wins: %d)"):format(m.Name, LT.wins)
-                    LT.lastAction = tick()
-                    if kind == "prompt" then
-                        firePrompt(obj)
-                    elseif ENV.fireclickdetector then
-                        ENV.fireclickdetector(obj)
-                    end
-
-                    -- 2) wait for the ticket it gives, equip + activate it
-                    local ticket = waitForTicket(CONFIG.LotteryTicketWait)
-                    if ticket then
-                        if equipTicket(ticket) then
-                            lotteryStatus.Text = ("Using %s (wins: %d)"):format(ticket.Name, LT.wins)
-                            LT.lastAction = tick()
-                            fireSignal(ticket.Activated, function() ticket:Activate() end)
-                            task.wait(0.1)
-                            fireSignal(ticket.Deactivated, function() ticket:Deactivate() end)
-                            LT.rounds += 1
-                        else
-                            lotteryStatus.Text = "Couldn't equip the ticket"
-                        end
-                    else
-                        lotteryStatus.Text = ("%s gave no ticket (prompt probably went on cooldown)"):format(m.Name)
-                    end
-
-                    -- 3) small pause, cut short if a win shows up
-                    local t1 = tick()
-                    while tick() - t1 < CONFIG.LotteryInterval and not LT.won and alive and flags.Lottery do
-                        task.wait(0.05)
-                    end
-                end
-            end
-        end
-    end
-end)
-
 local miscPage = addTab("Misc", false)
 local subs = addSubTabs(miscPage, { "Console", "Info", "Settings" })
 
@@ -2084,7 +2305,7 @@ task.spawn(function()
     end
 end)
 
--- Info ------------------------------------------------------------------
+-- Info tab
 local fps = 60
 track(RunService.RenderStepped:Connect(function(dt) fps = fps + (1 / math.max(dt, 1e-4) - fps) * 0.1 end))
 
@@ -2094,9 +2315,11 @@ addSection(subs.Info, "Players")
 local playersLabel = addLabel(subs.Info, "")
 addSection(subs.Info, "Local Player")
 local localLabel = addLabel(subs.Info, "")
+addSection(subs.Info, "Active Currents (injected)")
+local currentsLabel = addLabel(subs.Info, "none")
 
 local function getPing()
-    local ok, v = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+    local ok, v = pcall(function() return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() end)
     return ok and math.floor(v) or -1
 end
 
@@ -2120,8 +2343,8 @@ task.spawn(function()
             local h = ch and ch:FindFirstChildOfClass("Humanoid")
             local part = ch and ch:FindFirstChild("HumanoidRootPart")
             local d = (hrp and part) and math.floor((part.Position - hrp.Position).Magnitude) or 0
-            pl[#pl + 1] = ("%s (@%s) | HP %s | %d studs%s"):format(
-                esc(p.DisplayName), esc(p.Name), h and math.floor(h.Health) or "-", d, p == LP and " [you]" or "")
+            pl[#pl + 1] = ("%s | HP %s | %d studs%s"):format(
+                esc(p.Name), h and math.floor(h.Health) or "-", d, p == LP and " [you]" or "")
         end
         playersLabel.Text = table.concat(pl, "\n")
 
@@ -2146,31 +2369,42 @@ task.spawn(function()
                 if v:IsA("ValueBase") then lines[#lines + 1] = ("%s = %s"):format(esc(v.Name), esc(v.Value)) end
             end
         end
-        lines[#lines + 1] = '<font color="#ff8a8a">-- player attributes --</font>'
-        lines[#lines + 1] = attrText(LP)
-        if ch then
-            lines[#lines + 1] = '<font color="#ff8a8a">-- character attributes --</font>'
-            lines[#lines + 1] = attrText(ch)
-        end
+        lines[#lines + 1] = '<font color="#ff8a8a">-- character attributes --</font>'
+        if ch then lines[#lines + 1] = attrText(ch) end
         if h then
             lines[#lines + 1] = '<font color="#ff8a8a">-- humanoid attributes --</font>'
             lines[#lines + 1] = attrText(h)
         end
         localLabel.Text = table.concat(lines, "\n")
+
+        local ci = {}
+        for k in pairs(currentKeepalive) do ci[#ci+1] = '<font color="#6ab0ff">'..esc(k)..'</font>' end
+        for k, v in pairs(numCurrentKeepalive) do ci[#ci+1] = '<font color="#ffcc4d">'..esc(k)..'='..tostring(v)..'</font>' end
+        currentsLabel.Text = #ci > 0 and table.concat(ci, "  ") or '<font color="#888888">none</font>'
+
         task.wait(1)
     end
 end)
 
--- Settings --------------------------------------------------------------
+----------------------------------------------------------------------
+-- SETTINGS
+----------------------------------------------------------------------
 addSection(subs.Settings, "Discord Webhook")
-addTextbox(subs.Settings, "https://discord.com/api/webhooks/...", function(t) webhookUrl = t:gsub("%s+", "") end)
+addTextbox(subs.Settings, "https://discord.com/api/webhooks/...", function(t)
+    webhookUrl = t:gsub("%s+", "")
+    if webhookUrl ~= "" then notify("Webhook URL saved", T.on) end
+end)
 addToggle(subs.Settings, "Use Webhook", false, function(v) flags.Webhook = v end)
-addToggle(subs.Settings, "Send a message when a Revenant dies", true, function(v) flags.WebhookRev = v end)
+addToggle(subs.Settings, "Notify on Revenant events", true, function(v) flags.WebhookRev = v end)
 addButton(subs.Settings, "Send test message", function()
-    sendWebhook("Revenant Debug - test", { { name = "Player", value = LP.Name } }, 0x46C86E, true)
+    sendWebhook("Revenant Debug — test ping", {
+        { name = "Status", value = "Online", inline = true },
+        { name = "Server", value = game.JobId ~= "" and game.JobId:sub(1,20) or "Studio", inline = true },
+    }, 0x46C86E, true)
+    notify("Test webhook sent", T.on)
 end)
 
-addSection(subs.Settings, "Energy Drink")
+addSection(subs.Settings, "Pseudo Infinite Stamina Keybind")
 do
     local keyBtn
     keyBtn = addButton(subs.Settings, "Keybind: none (click to set)", function()
@@ -2190,6 +2424,7 @@ do
             else
                 Drink.key = i.KeyCode
                 keyBtn.Text = ("Keybind: %s (click to change)"):format(i.KeyCode.Name)
+                notify("Stamina keybind set: " .. i.KeyCode.Name, T.blue)
             end
             return
         end
@@ -2202,12 +2437,51 @@ end
 addSection(subs.Settings, "UI")
 addLabel(subs.Settings, ("Hide/show key: %s\nDrag the title bar to move, drag the corner grip to resize."):format(CONFIG.ToggleKey.Name))
 
+addSection(subs.Settings, "Current Exploit Tools")
+addButton(subs.Settings, "Flush all injected currents", function()
+    for name in pairs(table.clone(currentKeepalive)) do
+        manageCurrent(name, false)
+    end
+    for name in pairs(table.clone(numCurrentKeepalive)) do
+        manageNumCurrent(name, 0, false)
+    end
+    notify("All injected currents flushed", T.accent)
+end)
+addButton(subs.Settings, "Dump Currents to console", function()
+    local cur = getCurrentsFolder()
+    if not cur then print("[RD] Currents folder not found") return end
+    print("[RD] === Currents ===")
+    for _, v in ipairs(cur:GetChildren()) do
+        print(("[RD]  %s (%s) = %s"):format(v.Name, v.ClassName, tostring(v:IsA("ValueBase") and v.Value or "?")))
+    end
+    notify("Currents dumped to console", T.blue)
+end)
+
+----------------------------------------------------------------------
+-- LOTTERY PAGE  (read-only info)
+----------------------------------------------------------------------
+local lotteryPage = addTab("Lottery", true)
+addSection(lotteryPage, "Lottery — Disabled")
+addLabel(lotteryPage, '<font color="#888888">Auto Lottery has been removed.\nOperate the lottery machines manually.</font>')
+
+----------------------------------------------------------------------
+-- CLOSE
+----------------------------------------------------------------------
 local function closeAll()
     if not alive then return end
     alive = false
     for _, t in ipairs(toggles) do pcall(function() t:Set(false) end) end
     table.clear(flags)
+    for name in pairs(table.clone(currentKeepalive)) do
+        table.clear(currentKeepalive)
+        removeCurrent(name)
+    end
+    for name in pairs(table.clone(numCurrentKeepalive)) do
+        table.clear(numCurrentKeepalive)
+        removeNumCurrent(name)
+    end
     restorePowerStationPrompts()
+    restorePromptHolds()
     releaseCamera()
     pcall(function() RunService:UnbindFromRenderStep("RevFarmCam") end)
     for _, c in pairs(revDiedConn) do pcall(function() c:Disconnect() end) end
@@ -2219,4 +2493,4 @@ _G.__RevenantDebugClose = closeAll
 track(closeBtn.Activated:Connect(closeAll))
 
 selectTab("NPCs")
-print("[RevenantDebug] Loaded.")
+print("[RevenantDebug] v2 Loaded.")
