@@ -9,27 +9,53 @@ local ENV = getfenv()
 
 local CONFIG = {
     PlaceId = 93531785397649,
-    Title   = "THE REVENANT: SUNRISEN MOD MENU 1.1",
+    Version = "1.2",
+    Title   = "THE REVENANT: SUNRISEN MOD MENU ".."1.2",
+    UpdateLog = {
+        " Added an update log.",
+        " Improved Auto Revenant Farm, webhook delivery, and horizontal tab scrolling.",
+        " Dead Revenants are no longer teleport targets; nearby ForceFields trigger an escape to the farthest configured map position.",
+        " Added inline keybind boxes to toggle configs; click a box and press any keyboard key to bind it.",
+    },
     ConfigFile = "RevenantSunrisen_CheatMenuConfig.json",
     RevenantNameMatch = { "revenant" }, MatchAnyNPC = false,
     ScrapAttribute = "ForcedClass", ScrapTypes = { "Golden", "Cursed" }, ScrapHoldOverride = 0,
+    ScrapOnRange = 4,
+    ScrapSettleTime = 0.25,
+    ScrapFireInterval = 0.2,
     ShopPos1Name = "ShopPart", ShopPos2Name = "ShopPart2",
+	AmmoBoxShop = "AmmoBox", --workspace.MAP.MAIN.Structures.Shop.AmmoBox
     PowerStationName = "PowerStation",
     PowerStationCoreNames = { "PowerStationCore", "Power Station Core", "Core" },
     AutoAttackRange = 7, AutoAttackInterval = 0.12,
+
     RevenantTools = {
         { name="Ocaso" }, { name="LAZARUS", rec=true }, { name="ENDBRINGER" },
         { name="Azure Endbringer", rec=true }, { name="Headtaker" },
         { name="Dragon Slayer", rec=true }, { name="Ivory-Periastron" },
     },
-    RevFarmDefaultTool = "LAZARUS", RevFarmDistance = 6, RevFarmYOffset = 1.5,
+    RevFarmDefaultTool = "LAZARUS", RevFarmDistance = 6, RevFarmYOffset = 2.5, RevFarmAimYOffset = 1.5,
+    RevFarmForceFieldEscapeRange = 20,
+    RevFarmStopHours = { "Blood Autumn", "Armageddon", "Lost Moon", "Lunar Eclipse", "Oblivion", "Enceladus", "Steampunk", "Ghoul" },
     HazardNames = { "BarbedWire", "RagdollPart" },
     SpeedCloneName = "Speed_COOLCHEATING", SpeedLimit = 150,
     PowerStationHold = 0.05, TeleportOffset = Vector3.new(0,0,0),
     ScrapRetryCooldown = 8, MaxConsoleLines = 250,
-    RageSpellFOVCurrent = { "RageFOV","RageFov","FOVRage","SpellFOV","RageSpellFOV" },
     DefaultMaxScraps = 5, MaxScrapSlots = 9,
+    SpecificTeleports = {
+        { label="Bunker",                    pos=Vector3.new(-136, -113, 312) },
+        { label="Bunker Entrance",           pos=Vector3.new( -88, -61, 149) },
+        { label="Cave",                      pos=Vector3.new(159, 15,-211) },
+        { label="Canvas Tent",               pos=Vector3.new( 350, 30, -21) },
+        { label="Church",                    pos=Vector3.new( 426, 19, 440) },
+        { label="Portals / ?",               pos=Vector3.new(-404, -10, 305) },
+        { label="Scrap Building",            pos=Vector3.new(-515, 4,  62) },
+        { label="Hideout / Small Bunker",    pos=Vector3.new(-330, -4,  29) },
+        { label="Tower",                     pos=Vector3.new(-131, 60, 500) },
+        { label="Man-made / Scrap Building", pos=Vector3.new(  43, 23, -67) },
+    },
 }
+CONFIG.Title = "THE REVENANT: SUNRISEN MOD MENU "..CONFIG.Version
 CONFIG.ToggleKey = Enum.KeyCode.RightShift
 
 if _G.__RevenantDebugClose then pcall(_G.__RevenantDebugClose) end
@@ -38,9 +64,12 @@ if game.PlaceId ~= CONFIG.PlaceId then
 end
 
 local alive, conns, toggles, flags = true, {}, {}, {}
-local toggleReg, sliderReg, settingsReg = {}, {}, {}
+local toggleReg, sliderReg, settingsReg, toggleBindReg = {}, {}, {}, {}
 local bindMode, bindDone, loadingDone = nil, 0, false
 local aimTarget
+
+local Share = { scrapBusy=false }
+local lottoWantsControl = function() return false end -- replaced by the lotto module
 
 local function track(c) conns[#conns+1] = c return c end
 local function esc(s) return (tostring(s):gsub("&","&amp;"):gsub("<","&lt;"):gsub(">","&gt;")) end
@@ -165,8 +194,30 @@ if canSave then
     local ok,data=pcall(function() if ENV.isfile(CONFIG.ConfigFile) then return HttpService:JSONDecode(ENV.readfile(CONFIG.ConfigFile)) end end)
     if ok and type(data)=="table" then Saved=data end
 end
+
+-- ============================================================
+-- UPDATE LOG
+-- Only the current version is stored; there is no version history.
+-- ============================================================
+local function updateAvailable()
+    return canSave and Saved.lastSeenVersion ~= CONFIG.Version
+end
+
+local function markVersionSeen()
+    if not canSave then return false end
+    Saved.lastSeenVersion = CONFIG.Version
+
+    local ok = pcall(function()
+        local data = type(Saved) == "table" and table.clone(Saved) or {}
+        data.lastSeenVersion = CONFIG.Version
+        ENV.writefile(CONFIG.ConfigFile, HttpService:JSONEncode(data))
+    end)
+
+    return ok
+end
 local S = {
     Theme="Crimson", NotifOff=false, NotifDuration=4, Transparency=0, Scale=100,
+    UIAnimations=true,
     ShowLoading=true, RestoreToggles=true, AutoSave=true, ToggleKey="RightShift",
     StaminaKey="", AutoSellMaxScraps=CONFIG.DefaultMaxScraps,
 }
@@ -177,6 +228,42 @@ S.NotifDuration=math.clamp(S.NotifDuration,1,10)
 S.Transparency=math.clamp(S.Transparency,0,60)
 S.Scale=math.clamp(S.Scale,70,130)
 do local ok,k=pcall(function() return Enum.KeyCode[S.ToggleKey] end) if ok and k then CONFIG.ToggleKey=k end end
+
+local function uiTween(inst,props,duration)
+    if not S.UIAnimations then
+        for k,v in pairs(props) do pcall(function() inst[k]=v end) end
+        return nil
+    end
+    local tw=Tween:Create(inst,TweenInfo.new(duration or 0.16,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),props)
+    tw:Play()
+    return tw
+end
+
+local function uiPulse(btn)
+    if not btn or not btn.Parent then return end
+    local sc=btn:FindFirstChild("MotionScale")
+    if not sc then sc=Instance.new("UIScale") sc.Name="MotionScale" sc.Scale=1 sc.Parent=btn end
+    uiTween(sc,{Scale=0.97},0.07)
+    task.delay(S.UIAnimations and 0.07 or 0,function() if sc.Parent then uiTween(sc,{Scale=1},0.10) end end)
+end
+
+local function makeDraggable(handle,target)
+    local active,origin,startPos=false,nil,nil
+    track(handle.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+            active,origin,startPos=true,i.Position,target.Position
+            local c; c=i.Changed:Connect(function()
+                if i.UserInputState==Enum.UserInputState.End then active=false c:Disconnect() end
+            end)
+        end
+    end))
+    track(UIS.InputChanged:Connect(function(i)
+        if active and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
+            local d=i.Position-origin
+            target.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
+        end
+    end))
+end
 
 -- ============================================================
 -- GUI ROOT
@@ -238,7 +325,7 @@ local function notify(message,kind)
     local lbl=new("TextLabel",{Position=UDim2.fromOffset(10,0),Size=UDim2.new(1,-14,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,Text=st.icon.."  "..message,TextColor3=Color3.new(1,1,1),TextTransparency=1,Font=Enum.Font.GothamMedium,TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,RichText=true,ZIndex=501,Parent=frame})
     lbl:SetAttribute("NoTheme",true) bar:SetAttribute("NoTheme",true) frame:SetAttribute("NoTheme",true)
     local hitbox=new("TextButton",{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Text="",ZIndex=502,Parent=frame})
-    local ti=TweenInfo.new(0.22,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
+    local ti=TweenInfo.new(S.UIAnimations and 0.22 or 0,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
     Tween:Create(frame,ti,{BackgroundTransparency=0.05}):Play()
     Tween:Create(stroke,ti,{Transparency=0.35}):Play()
     Tween:Create(bar,ti,{BackgroundTransparency=0}):Play()
@@ -248,7 +335,7 @@ local function notify(message,kind)
     dismiss=function()
         if dismissed then return end dismissed=true
         local i=table.find(activeNotifs,dismiss) if i then table.remove(activeNotifs,i) end
-        local to=TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
+        local to=TweenInfo.new(S.UIAnimations and 0.2 or 0,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
         local tw=Tween:Create(frame,to,{BackgroundTransparency=1})
         Tween:Create(stroke,to,{Transparency=1}):Play() Tween:Create(bar,to,{BackgroundTransparency=1}):Play() Tween:Create(lbl,to,{TextTransparency=1}):Play()
         tw.Completed:Connect(function() pcall(function() frame:Destroy() end) end) tw:Play()
@@ -275,7 +362,7 @@ do
     closeBtn=titleBtn("X",-6,T.accent)
     local minBtn=titleBtn("-",-32,T.off)
 
-    local tabBar=new("Frame",{Position=UDim2.fromOffset(0,28),Size=UDim2.new(1,0,0,32),BackgroundColor3=T.side,BorderSizePixel=0,Parent=win},{
+    local tabBar=new("ScrollingFrame",{Position=UDim2.fromOffset(0,28),Size=UDim2.new(1,0,0,32),BackgroundColor3=T.side,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=T.accent,ScrollingDirection=Enum.ScrollingDirection.X,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.X,Active=true,ClipsDescendants=true,Parent=win},{
         new("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,2),VerticalAlignment=Enum.VerticalAlignment.Center}),
         new("UIPadding",{PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)}),
     })
@@ -311,7 +398,7 @@ do
     local pages,tabButtons={},{}
     local function selectTab(name)
         for n,p in pairs(pages) do p.Visible=(n==name) end
-        for n,b in pairs(tabButtons) do b.BackgroundColor3=(n==name) and T.accent or T.row b.Font=(n==name) and Enum.Font.GothamBold or Enum.Font.GothamMedium end
+        for n,b in pairs(tabButtons) do uiTween(b,{BackgroundColor3=(n==name) and T.accent or T.row},0.14) b.Font=(n==name) and Enum.Font.GothamBold or Enum.Font.GothamMedium end
     end
 
     local lo=0
@@ -331,17 +418,26 @@ do
     end
 
     local function addSubTabs(page,names,btnWidth)
-        local bar=new("Frame",{Size=UDim2.new(1,0,0,28),BackgroundTransparency=1,Parent=page},{
+        local bar=new("ScrollingFrame",{Size=UDim2.new(1,0,0,28),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=0,ScrollingDirection=Enum.ScrollingDirection.X,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.X,Active=true,Parent=page},{
             new("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,4),VerticalAlignment=Enum.VerticalAlignment.Center}),
-            new("UIPadding",{PaddingLeft=UDim.new(0,2)}),
+            new("UIPadding",{PaddingLeft=UDim.new(0,2),PaddingRight=UDim.new(0,2)}),
         })
         local holder=new("Frame",{Position=UDim2.fromOffset(0,32),Size=UDim2.new(1,0,1,-32),BackgroundTransparency=1,Parent=page})
         local subs,btns={},{}
-        local function pick(n) for k,s in pairs(subs) do s.Visible=(k==n) end for k,bb in pairs(btns) do bb.BackgroundColor3=(k==n) and T.accent or T.row end end
+        local function pick(n)
+            for k,s in pairs(subs) do s.Visible=(k==n) end
+            for k,bb in pairs(btns) do uiTween(bb,{BackgroundColor3=(k==n) and T.accent or T.row},0.14) end
+            local b=btns[n]
+            if b and b.AbsolutePosition.X < bar.AbsolutePosition.X then
+                bar.CanvasPosition=Vector2.new(math.max(0,b.AbsolutePosition.X-bar.AbsolutePosition.X-4),0)
+            elseif b and b.AbsolutePosition.X+b.AbsoluteSize.X > bar.AbsolutePosition.X+bar.AbsoluteSize.X then
+                bar.CanvasPosition=Vector2.new(math.max(0,b.AbsolutePosition.X+b.AbsoluteSize.X-bar.AbsolutePosition.X-bar.AbsoluteSize.X+4),0)
+            end
+        end
         for _,n in ipairs(names) do
-            btns[n]=new("TextButton",{Size=UDim2.fromOffset(btnWidth or 84,22),BackgroundColor3=T.row,Text=n,TextColor3=T.text,Font=Enum.Font.GothamMedium,TextSize=11,Parent=bar},{corner(5)})
+            btns[n]=new("TextButton",{Size=UDim2.fromOffset(btnWidth or 84,22),BackgroundColor3=T.row,Text=n,TextColor3=T.text,Font=Enum.Font.GothamMedium,TextSize=11,AutoButtonColor=false,Parent=bar},{corner(5)})
             subs[n]=newList(holder) subs[n].Visible=false
-            track(btns[n].Activated:Connect(function() pick(n) end))
+            track(btns[n].Activated:Connect(function() uiPulse(btns[n]) pick(n) end))
         end
         pick(names[1]) return subs
     end
@@ -360,8 +456,8 @@ do
         })
     end
     local function addButton(parent,text,cb)
-        local b=new("TextButton",{Size=UDim2.new(1,0,0,26),BackgroundColor3=T.row,Text=text,TextColor3=T.text,Font=Enum.Font.GothamMedium,TextSize=12,LayoutOrder=nextLO(),Parent=parent},{corner(6)})
-        track(b.Activated:Connect(function() task.spawn(cb,b) end)) return b
+        local b=new("TextButton",{Size=UDim2.new(1,0,0,26),BackgroundColor3=T.row,Text=text,TextColor3=T.text,Font=Enum.Font.GothamMedium,TextSize=12,AutoButtonColor=false,LayoutOrder=nextLO(),Parent=parent},{corner(6)})
+        track(b.Activated:Connect(function() uiPulse(b) task.spawn(cb,b) end)) return b
     end
     local function addTextbox(parent,placeholder,cb)
         local tb=new("TextBox",{Size=UDim2.new(1,0,0,26),BackgroundColor3=T.row,PlaceholderText=placeholder,Text="",TextColor3=T.text,PlaceholderColor3=T.dim,Font=Enum.Font.Code,TextSize=12,ClearTextOnFocus=false,TextXAlignment=Enum.TextXAlignment.Left,LayoutOrder=nextLO(),Parent=parent},{
@@ -370,21 +466,69 @@ do
         track(tb.FocusLost:Connect(function() cb(tb.Text) end)) return tb
     end
     local function addToggle(parent,text,default,cb,opts)
+        opts=opts or {}
         local btn=new("TextButton",{Size=UDim2.new(1,0,0,28),BackgroundColor3=T.row,Text="",AutoButtonColor=false,LayoutOrder=nextLO(),Parent=parent},{corner(6)})
-        new("TextLabel",{BackgroundTransparency=1,Position=UDim2.fromOffset(10,0),Size=UDim2.new(1,-60,1,0),Text=text,TextColor3=T.text,Font=Enum.Font.GothamMedium,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Parent=btn})
+        local label=new("TextLabel",{BackgroundTransparency=1,Position=UDim2.fromOffset(10,0),Size=UDim2.new(1,-142,1,0),Text=text,TextColor3=T.text,Font=Enum.Font.GothamMedium,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Parent=btn})
+
+        local keyBtn
+        local obj={State=false,Kind="toggle",Name=text,Key=nil,KeyButton=nil}
+
+        if opts.keybind~=false then
+            keyBtn=new("TextButton",{
+                AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-50,0.5,0),
+                Size=UDim2.fromOffset(58,20),BackgroundColor3=T.off,
+                Text="NONE",TextColor3=T.dim,Font=Enum.Font.GothamBold,TextSize=10,
+                AutoButtonColor=false,ZIndex=btn.ZIndex+1,Parent=btn
+            },{corner(5)})
+            obj.KeyButton=keyBtn
+
+            local function refreshBindLabel()
+                keyBtn.Text=obj.Key and obj.Key.Name or "NONE"
+                keyBtn.TextColor3=obj.Key and T.text or T.dim
+                keyBtn.BackgroundColor3=obj.Key and T.off or T.off
+            end
+
+            function obj:SetKey(key,silent)
+                if key~=nil and typeof(key)~="EnumItem" then return false end
+                if key and key.EnumType~=Enum.KeyCode then return false end
+                self.Key=key
+                refreshBindLabel()
+                if opts.onKeyChanged then pcall(opts.onKeyChanged,key) end
+                if not silent and key then notify(text.." keybind: "..key.Name,"info") end
+                return true
+            end
+
+            track(keyBtn.Activated:Connect(function()
+                uiPulse(keyBtn)
+                bindMode={kind="toggle",obj=obj,button=keyBtn}
+                keyBtn.Text="PRESS KEY"
+                keyBtn.TextColor3=T.text
+            end))
+
+            local legacyKey=opts.key
+            if legacyKey and typeof(legacyKey)=="EnumItem" then
+                obj:SetKey(legacyKey,true)
+            elseif type(legacyKey)=="string" and legacyKey~="" then
+                local ok,k=pcall(function() return Enum.KeyCode[legacyKey] end)
+                if ok and k then obj:SetKey(k,true) end
+            end
+        end
+
         local sw=new("Frame",{AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-8,0.5,0),Size=UDim2.fromOffset(34,16),BackgroundColor3=T.off,Parent=btn},{corner(8)})
         local knob=new("Frame",{Size=UDim2.fromOffset(12,12),Position=UDim2.fromOffset(2,2),BackgroundColor3=Color3.new(1,1,1),Parent=sw},{corner(6)})
-        local obj={State=false,Kind="toggle",Name=text}
+
         function obj:Set(v,silent)
             if self.State==v then return end self.State=v
-            sw.BackgroundColor3=v and T.on or T.off
-            knob.Position=v and UDim2.fromOffset(20,2) or UDim2.fromOffset(2,2)
+            uiTween(sw,{BackgroundColor3=v and T.on or T.off},0.14)
+            uiTween(knob,{Position=v and UDim2.fromOffset(20,2) or UDim2.fromOffset(2,2)},0.16)
             task.spawn(function() local ok,err=pcall(cb,v) if not ok then warn("[Mod] toggle '"..text.."' error: "..tostring(err)) end end)
             if not silent then notify((v and "Enabled: " or "Disabled: ")..esc(text),v and "success" or "neutral") end
         end
-        track(btn.Activated:Connect(function() obj:Set(not obj.State) end))
+
+        track(btn.Activated:Connect(function() uiPulse(btn) obj:Set(not obj.State) end))
         toggles[#toggles+1]=obj
-        if opts and opts.setting then settingsReg[opts.setting]=obj else toggleReg[text]=obj end
+        toggleBindReg[text]=obj
+        if opts.setting then settingsReg[opts.setting]=obj else toggleReg[text]=obj end
         if default then task.defer(function() obj:Set(true,true) end) end
         return obj
     end
@@ -416,17 +560,18 @@ do
 
     -- Help popup
     local helpPopup=new("Frame",{AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),Size=UDim2.fromOffset(300,180),BackgroundColor3=T.top,Visible=false,Active=true,ZIndex=30,Parent=win},{corner(8),new("UIStroke",{Color=T.accent,Thickness=1})})
-    local helpText=new("TextLabel",{BackgroundTransparency=1,Position=UDim2.fromOffset(12,10),Size=UDim2.new(1,-24,1,-50),TextWrapped=true,TextColor3=T.text,Font=Enum.Font.Gotham,TextSize=12,ZIndex=31,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Text="",Parent=helpPopup})
-    local helpOk=new("TextButton",{AnchorPoint=Vector2.new(0.5,1),Position=UDim2.new(0.5,0,1,-10),Size=UDim2.fromOffset(80,24),BackgroundColor3=T.accent,Text="Got it",TextColor3=T.text,Font=Enum.Font.GothamBold,TextSize=12,ZIndex=31,Parent=helpPopup},{corner(6)})
-    track(helpOk.Activated:Connect(function() helpPopup.Visible=false end))
-    local function showHelp(text) helpText.Text=text helpPopup.Visible=true end
-
-    local function addSectionHelp(parent,text,help)
-        local row=new("Frame",{Size=UDim2.new(1,0,0,18),BackgroundTransparency=1,LayoutOrder=nextLO(),Parent=parent})
-        new("TextLabel",{BackgroundTransparency=1,Size=UDim2.new(1,-24,1,0),Text=string.upper(text),TextColor3=T.accent,Font=Enum.Font.GothamBold,TextSize=11,TextXAlignment=Enum.TextXAlignment.Left,Parent=row})
-        local q=new("TextButton",{AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,0,0.5,0),Size=UDim2.fromOffset(16,16),BackgroundColor3=T.row,Text="?",TextColor3=T.text,Font=Enum.Font.GothamBold,TextSize=11,Parent=row},{corner(8)})
-        track(q.Activated:Connect(function() showHelp(help) end)) return row
+    local helpDrag=new("Frame",{Size=UDim2.new(1,0,0,32),BackgroundTransparency=1,Active=true,ZIndex=32,Parent=helpPopup})
+    new("TextLabel",{BackgroundTransparency=1,Position=UDim2.fromOffset(12,0),Size=UDim2.new(1,-24,1,0),Text="HELP",TextColor3=T.accent,Font=Enum.Font.GothamBold,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=32,Parent=helpDrag})
+    local helpText=new("TextLabel",{BackgroundTransparency=1,Position=UDim2.fromOffset(12,36),Size=UDim2.new(1,-24,1,-76),TextWrapped=true,TextColor3=T.text,Font=Enum.Font.Gotham,TextSize=12,ZIndex=31,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Text="",Parent=helpPopup})
+    local helpOk=new("TextButton",{AnchorPoint=Vector2.new(0.5,1),Position=UDim2.new(0.5,0,1,-10),Size=UDim2.fromOffset(80,24),BackgroundColor3=T.accent,Text="Got it",TextColor3=T.text,Font=Enum.Font.GothamBold,TextSize=12,AutoButtonColor=false,ZIndex=31,Parent=helpPopup},{corner(6)})
+    makeDraggable(helpDrag,helpPopup)
+    track(helpOk.Activated:Connect(function() uiPulse(helpOk) if S.UIAnimations then uiTween(helpPopup,{BackgroundTransparency=1},0.12) task.delay(0.12,function() if helpPopup.Parent then helpPopup.Visible=false helpPopup.BackgroundTransparency=0 end end) else helpPopup.Visible=false end end))
+    local function showHelp(text)
+        helpText.Text=text helpPopup.Visible=true
+        helpPopup.BackgroundTransparency=1
+        uiTween(helpPopup,{BackgroundTransparency=0},0.16)
     end
+
 
     -- ============================================================
     -- HOME TAB
@@ -487,20 +632,43 @@ do
         end
     end)
 
-    -- Hour watcher
     do
         local lastHourNotified=""
-        local webhookUrl_inner=(type(Saved.webhook)=="string") and Saved.webhook or ""
-        local httpRequest=ENV.request or ENV.http_request or (ENV.syn and ENV.syn.request) or (ENV.http and ENV.http.request)
+        _G.__RS_sendWebhook=function(title,fields,color,force)
+            local url=(type(_G.__RS_webhookUrl)=="string" and _G.__RS_webhookUrl or Saved.webhook or ""):gsub("%s+","")
+            if (not force and not flags.Webhook) or url=="" then return false,"Webhook is disabled or no URL is configured" end
 
-        local function sendWebhook(title,fields,color,force)
-            if not force and not flags.Webhook then return end
-            if webhookUrl_inner=="" then return end
-            local body=HttpService:JSONEncode({username="Revenant Mod",embeds={{title=title,color=color or 0xCD323C,fields=fields or {},timestamp=DateTime.now():ToIsoDate()}}})
-            if httpRequest then pcall(httpRequest,{Url=webhookUrl_inner,Method="POST",Headers={["Content-Type"]="application/json"},Body=body})
-            else pcall(function() HttpService:PostAsync(webhookUrl_inner,body) end) end
+            local body=HttpService:JSONEncode({username="Revenant Mod",embeds={{title=tostring(title or "Revenant Mod"),color=color or 0xCD323C,fields=fields or {},timestamp=DateTime.now():ToIsoDate()}}})
+            local request=ENV.request or ENV.http_request or (ENV.syn and ENV.syn.request) or (ENV.http and ENV.http.request)
+
+            if request then
+                local ok,res=pcall(request,{Url=url,Method="POST",Headers={["Content-Type"]="application/json"},Body=body})
+                if not ok then
+                    warn("[Mod] Webhook request failed: "..tostring(res))
+                    return false,tostring(res)
+                end
+                local status=res and (res.StatusCode or res.Status)
+                if status and tonumber(status) and (tonumber(status)<200 or tonumber(status)>=300) then
+                    warn(("[Mod] Webhook returned HTTP %s: %s"):format(tostring(status),tostring(res.Body or res.StatusMessage or "")))
+                    return false,tostring(status)
+                end
+                return true,res
+            end
+
+            local ok,res=pcall(function()
+                return HttpService:RequestAsync({Url=url,Method="POST",Headers={["Content-Type"]="application/json"},Body=body})
+            end)
+            if not ok then
+                warn("[Mod] HttpService webhook failed: "..tostring(res))
+                return false,tostring(res)
+            end
+            if type(res)=="table" and res.Success==false then
+                warn("[Mod] HttpService webhook returned an error: "..tostring(res.StatusCode or res.StatusMessage or res.Body or "unknown"))
+                return false,res
+            end
+            return true,res
         end
-        _G.__RS_sendWebhook=sendWebhook
+        local sendWebhook=_G.__RS_sendWebhook
 
         task.spawn(function()
             local rsValues=RS:FindFirstChild("Values")
@@ -515,9 +683,8 @@ do
                         if name~=lastHourNotified then
                             lastHourNotified=name hourLabel.Text=('Active: <font color="#ffcc4d">%s</font>'):format(esc(name))
                             notify("Hour active: "..name,"warn")
-                            if flags.Webhook and webhookUrl_inner~="" and httpRequest then
-                                local body=HttpService:JSONEncode({username="Revenant Mod",embeds={{title="Hour Active",color=0xFFCC4D,fields={{name="Hour",value=name,inline=true},{name="Server",value=game.JobId~="" and game.JobId:sub(1,20) or "Studio",inline=true}},timestamp=DateTime.now():ToIsoDate()}}})
-                                pcall(httpRequest,{Url=webhookUrl_inner,Method="POST",Headers={["Content-Type"]="application/json"},Body=body})
+                            if flags.Webhook then
+                                sendWebhook("Hour Active",{{name="Hour",value=name,inline=true},{name="Server",value=game.JobId~="" and game.JobId:sub(1,20) or "Studio",inline=true}},0xFFCC4D)
                             end
                         end
                     else if lastHourNotified~="" then lastHourNotified="" hourLabel.Text="None" end end
@@ -533,7 +700,7 @@ do
     local npcPage=addTab("NPCs")
     local revenants,revESP,selectedModel,cycleIdx={},{},nil,0
 
-    local RevFarm={ tool=CONFIG.RevFarmDefaultTool,head=true,body="Torso",dist=CONFIG.RevFarmDistance,camAim=true,camHeld=false,rows={},custom={},customList={},target=nil,kills=0,status=nil,toggle=nil,lastSwingAt=0,stuckTimer=0,reEquipCooldown=0 }
+    local RevFarm={ tool=CONFIG.RevFarmDefaultTool,body="Torso",dist=CONFIG.RevFarmDistance,camAim=true,camHeld=false,rows={},custom={},customList={},target=nil,kills=0,status=nil,toggle=nil,lastSwingAt=0,stuckTimer=0,reEquipCooldown=0 }
     local revHum={} local revDeathSent=setmetatable({},{__mode="k"}) local revDiedConn={}
 
     local function nameMatches(inst) local n=inst.Name:lower() for _,s in ipairs(CONFIG.RevenantNameMatch) do if n:find(s,1,true) then return true end end end
@@ -547,14 +714,7 @@ do
     local reportRevDeath,dropRevenant,reportRevEvent,clearRev,considerHumanoid,rescanRevenants,sortedRevenants
 
     do
-        local webhookUrl_inner=(type(Saved.webhook)=="string") and Saved.webhook or ""
-        local httpRequest=ENV.request or ENV.http_request or (ENV.syn and ENV.syn.request) or (ENV.http and ENV.http.request)
-        local function sendWebhook(title,fields,color,force)
-            if not force and not flags.Webhook then return end if webhookUrl_inner=="" then return end
-            local body=HttpService:JSONEncode({username="Revenant Mod",embeds={{title=title,color=color or 0xCD323C,fields=fields or {},timestamp=DateTime.now():ToIsoDate()}}})
-            if httpRequest then pcall(httpRequest,{Url=webhookUrl_inner,Method="POST",Headers={["Content-Type"]="application/json"},Body=body}) else pcall(function() HttpService:PostAsync(webhookUrl_inner,body) end) end
-        end
-
+        local sendWebhook=_G.__RS_sendWebhook
         reportRevEvent=function(title,m,extraFields,color)
             if not flags.WebhookRev then return end
             local part=partOf(m) local pos=part and part.Position or Vector3.zero
@@ -597,10 +757,10 @@ do
 
     addSection(npcPage,"Target")
     local targetBtn=addButton(npcPage,"Target: nearest (click to cycle)",function()
-        local arr=sortedRevenants() cycleIdx=(cycleIdx+1)%(#arr+1) selectedModel=(cycleIdx>0) and arr[cycleIdx] or nil
+        local arr=sortedRevenants(true) cycleIdx=(cycleIdx+1)%(#arr+1) selectedModel=(cycleIdx>0) and arr[cycleIdx] or nil
     end)
     addButton(npcPage,"Teleport to revenant",function()
-        local arr=sortedRevenants() local target=selectedModel or arr[1] local part=partOf(target)
+        local arr=sortedRevenants(true) local target=selectedModel or arr[1] local hum=target and target:FindFirstChildOfClass("Humanoid") local part=(hum and hum.Health>0) and partOf(target) or nil
         if part then teleportTo(part.CFrame) notify("Teleported to revenant: "..esc(target and target.Name or "?"),"info")
         else notify("No revenant found to teleport to","error") end
     end)
@@ -619,7 +779,7 @@ do
     task.spawn(function()
         while alive do
             if flags.AutoAttack and not flags.RevFarm then
-                local hrp=getHRP() local ch=LP.Character local tool=ch and ch:FindFirstChildOfClass("Tool") local tp=partOf(sortedRevenants(false)[1])
+                local hrp=getHRP() local ch=LP.Character local tool=ch and ch:FindFirstChildOfClass("Tool") local tp=partOf(sortedRevenants(true)[1])
                 if not hrp or not tool then autoStatus.Text="No weapon equipped"
                 elseif not tp then autoStatus.Text="No revenant found"
                 else local dist=math.floor((tp.Position-hrp.Position).Magnitude)
@@ -739,12 +899,31 @@ do
             return goldCache.list
         end
         local function scrapAvailable(inst,prompt) if not inst:IsDescendantOf(workspace) then return false end return promptAvailable(prompt or promptFor(inst,scrapsRoot())) end
-        spamPrompt=function(prompt,inst,cf,maxTime)
-            local t0=tick()
+
+        -- Stand ON the scrap, wait until the server has had time to see us there, and only then fire the prompt.
+        -- Returns: true = picked up, false = timed out, nil = yielded to the lottery (higher priority).
+        spamPrompt=function(prompt,inst,maxTime)
+            local t0,onSince=tick(),nil
             while flags.Farm and tick()-t0<maxTime do
+                if lottoWantsControl() then return nil end
                 if not scrapAvailable(inst,prompt) then return true end
-                local h=getHRP() if h and(h.Position-cf.Position).Magnitude>6 then teleportTo(cf) end
-                zeroPromptHold(prompt) pcall(firePrompt,prompt) task.wait(4)
+                local part=partOf(inst) local h=getHRP()
+                if not(part and h) then return false end
+                local dist=(h.Position-part.Position).Magnitude
+                if dist>CONFIG.ScrapOnRange then
+                    -- not on the scrap (yet / anymore): go there and restart the settle timer
+                    onSince=nil
+                    teleportTo(CFrame.new(part.Position))
+                    h.AssemblyLinearVelocity=Vector3.zero
+                    task.wait(0.05)
+                else
+                    onSince=onSince or tick()
+                    h.AssemblyLinearVelocity=Vector3.zero
+                    if tick()-onSince>=CONFIG.ScrapSettleTime then
+                        zeroPromptHold(prompt) pcall(firePrompt,prompt)
+                        task.wait(CONFIG.ScrapFireInterval)
+                    else task.wait() end
+                end
             end
             return not scrapAvailable(inst,prompt)
         end
@@ -771,7 +950,7 @@ do
         local farmStatus,farmCollected=nil,0
         local scrapStats
         addToggle(scrapPage,"Scrap Farming",false,function(v)
-            flags.Farm=v if not v then releaseCamera() restorePromptHolds() if farmStatus then farmStatus.Text="Idle" end end
+            flags.Farm=v if not v then Share.scrapBusy=false releaseCamera() restorePromptHolds() if farmStatus then farmStatus.Text="Idle" end end
         end)
         addToggle(scrapPage,"Strict golden color check",true,function(v) flags.StrictGold=v goldCache.t=0 end)
         local spamSlider
@@ -798,6 +977,9 @@ do
                 if flags.Farm then
                     local hrp=getHRP()
                     if not hrp then farmStatus.Text="Waiting for character..." task.wait(0.5)
+                    elseif lottoWantsControl() then
+                        -- Lottery has priority over scrap farming
+                        farmStatus.Text="Paused, lottery has priority" task.wait(0.3)
                     else
                         if flags.AutoSell and countScraps()>=autoSellMaxScraps then farmStatus.Text="Scraps full, selling before farming..." doSell(("auto pre-farm, %d scraps"):format(countScraps())) task.wait(2.5) end
                         local best,bestDist
@@ -810,17 +992,21 @@ do
                         local count=countScraps()
                         scrapStats.Text=("Golden: %d  |  skipped: %d  |  collected: %d  |  inv: %d/%d"):format(#list,goldCache.rejected,farmCollected,count,CONFIG.MaxScrapSlots)
                         if best then
-                            local inst,prompt=best.inst,best.prompt local cf=promptCFrame(prompt,inst)
-                            if cf then
-                                local scrapPart=partOf(inst) local lookAt=scrapPart and scrapPart.Position or cf.Position
-                                farmStatus.Text="Collecting Golden..." teleportTo(cf) task.wait(0.12)
-                                local picked=spamPrompt(prompt,inst,cf,7)
+                            local inst,prompt=best.inst,best.prompt
+                            local scrapPart=partOf(inst)
+                            if scrapPart then
+                                farmStatus.Text="Collecting Golden..."
+                                Share.scrapBusy=true
+                                local picked=spamPrompt(prompt,inst,7)
+                                Share.scrapBusy=false
                                 releaseCamera() goldCache.t=0
                                 if picked then
                                     farmCollected+=1 farmStatus.Text="Collected, waiting..."
                                     notify(("Golden scrap #%d collected"):format(farmCollected),"farm")
                                     local sw=_G.__RS_sendWebhook if sw then sw("Scrap Collected: Golden",{{name="Type",value="Golden",inline=true},{name="Collected",value=tostring(farmCollected),inline=true},{name="Inv",value=("%d/%d"):format(countScraps(),CONFIG.MaxScrapSlots),inline=true}},0xFFC828) end
                                     task.wait(0.4)
+                                elseif picked==nil then
+                                    farmStatus.Text="Yielded to lottery, will resume after" task.wait(0.3)
                                 else scrapCooldown[inst]=tick()+CONFIG.ScrapRetryCooldown farmStatus.Text="Pickup timed out, cooling down..." end
                             else scrapCooldown[inst]=tick()+CONFIG.ScrapRetryCooldown end
                         else farmStatus.Text="No golden scrap available, waiting..." task.wait(0.4) end
@@ -891,6 +1077,14 @@ do
             return nil, nil, nil
         end
 
+        -- Lottery has priority over scrap farming: it "wants control" whenever it is running
+        -- and at least one machine is off cooldown.
+        lottoWantsControl = function()
+            if not lottoState.running then return false end
+            local part, pp = getAvailableMachine()
+            return part ~= nil and pp ~= nil
+        end
+
         local function chatIsWin(msg)
             local lower = msg:lower()
             local nameL = LP.Name:lower()
@@ -935,7 +1129,7 @@ do
                 notify("Auto Lotto stopped","neutral")
             else
                 lottoWon=false
-                notify("Auto Lotto started","farm")
+                notify("Auto Lotto started (priority over scrap farm)","farm")
             end
         end)
 
@@ -959,9 +1153,18 @@ do
                 if machineName then lastPromptSeen[machineName]=tick() end
 
                 if not part or not pp then
-                    lottoState.status.Text="No lottery machine available, wait until one goes off cooldown."
+                    lottoState.status.Text=flags.Farm and "No lottery machine available, scrap farm has control until one is ready." or "No lottery machine available, wait until one goes off cooldown."
                     task.wait(0.5); continue
                 end
+
+                -- Scrap farm yields as soon as we want control; give it a moment to finish its current step
+                local waited=0
+                while Share.scrapBusy and waited<2 and lottoState.running do
+                    lottoState.status.Text="Waiting for scrap farm to yield..."
+                    task.wait(0.05) waited+=0.05
+                end
+                hrp=getHRP()
+                if not hrp then task.wait(0.2); continue end
 
                 local promptCF = part.CFrame
                 local offsetCF = promptCF
@@ -1042,8 +1245,7 @@ do
             if RevFarm.body=="HumanoidRootPart" then
                 return m:FindFirstChild("HumanoidRootPart") or partOf(m)
             end
-            return m:FindFirstChild("Torso") or m:FindFirstChild("UpperTorso")
-                or m:FindFirstChild("Torso",true) or m:FindFirstChild("HumanoidRootPart") or partOf(m)
+            return m:FindFirstChild("Torso") or m:FindFirstChild("UpperTorso") or partOf(m)
         end
 
         local function hasForceField(m)
@@ -1062,7 +1264,27 @@ do
             return partial
         end
         local function stopSwing() local ch=LP.Character local tool=ch and ch:FindFirstChildOfClass("Tool") if tool then fireSignal(tool.Deactivated,function() tool:Deactivate() end) end end
-        local function releaseRevCamera() if RevFarm.camHeld then RevFarm.camHeld=false releaseCamera() end end
+
+        -- Rev Farm uses real first-person while the lock is active so weapon scripts that
+        -- read CurrentCamera/CFrame aim from the actual player view at the revenant.
+        local revPrevCameraMode,revPrevCameraType=nil,nil
+        local function engageRevCamera()
+            if RevFarm.camHeld then return end
+            local cam=workspace.CurrentCamera
+            revPrevCameraMode=LP.CameraMode
+            revPrevCameraType=cam and cam.CameraType or nil
+            LP.CameraMode=Enum.CameraMode.LockFirstPerson
+            if cam then cam.CameraType=Enum.CameraType.Custom end
+            RevFarm.camHeld=true
+        end
+        local function releaseRevCamera()
+            if not RevFarm.camHeld then return end
+            RevFarm.camHeld=false
+            LP.CameraMode=revPrevCameraMode or Enum.CameraMode.Classic
+            local cam=workspace.CurrentCamera
+            if cam then cam.CameraType=revPrevCameraType or Enum.CameraType.Custom end
+            revPrevCameraMode,revPrevCameraType=nil,nil
+        end
 
         addSection(revPage,"Auto Farm Revenant")
         RevFarm.toggle=addToggle(revPage,"Auto Farm Revenant",false,function(v)
@@ -1125,25 +1347,119 @@ do
 
         pcall(function() RunService:UnbindFromRenderStep("RevFarmCam") end)
         RunService:BindToRenderStep("RevFarmCam",Enum.RenderPriority.Camera.Value+10,function()
-            if not flags.RevFarm or not RevFarm.camAim then return end
+            if not flags.RevFarm or not RevFarm.camAim then
+                if RevFarm.camHeld then releaseRevCamera() end
+                return
+            end
             local cam=workspace.CurrentCamera local hrp=getHRP()
             local m=RevFarm.target
             local part=m and m:IsDescendantOf(workspace) and revPartFor(m)
             if not(cam and hrp and part) then releaseRevCamera() return end
-            RevFarm.camHeld=true
-            cam.CameraType=Enum.CameraType.Scriptable
-			local eyePos=hrp.Position+Vector3.new(0,1.5,0)
-            local targetPos=part.Position+Vector3.new(0,0.5,0)
-            cam.CFrame=CFrame.lookAt(eyePos,targetPos)
+
+            engageRevCamera()
+            -- Keep the normal Roblox first-person camera active. Rotating the character
+            -- instead of forcing a Scriptable camera makes weapon raycasts use the real
+            -- first-person camera direction while preserving the old lock-on behavior.
+            local targetPos=part.Position+Vector3.new(0,CONFIG.RevFarmAimYOffset or 1.5,0)
+            local flatTarget=Vector3.new(targetPos.X,hrp.Position.Y,targetPos.Z)
+            if (flatTarget-hrp.Position).Magnitude>0.05 then
+                hrp.CFrame=CFrame.lookAt(hrp.Position,flatTarget)
+            end
+            -- Apply the final pitch/yaw to the real first-person camera after Roblox's
+            -- normal camera update. Weapon raycasts that use Camera.CFrame now point
+            -- directly at the same revenant the farm is targeting.
+            cam.CFrame=CFrame.lookAt(cam.CFrame.Position,targetPos)
         end)
 
         RevFarm.ffWaiting=false
+
+        -- If one of the dangerous/special hours starts while the farm is running,
+        -- stop the farm and move to whichever configured teleport is farthest away.
+        local revFarmStopHours={}
+        for _,name in ipairs(CONFIG.RevFarmStopHours or {}) do
+            revFarmStopHours[name]=true
+        end
+
+        local function getFarthestRevFarmTeleport()
+            local hrp=getHRP()
+            if not hrp then return nil,nil end
+
+            local farthest,farthestDistance=nil,-math.huge
+            for _,entry in ipairs(CONFIG.SpecificTeleports or {}) do
+                local pos=entry and entry.pos
+                if typeof(pos)=="Vector3" then
+                    local distance=(pos-hrp.Position).Magnitude
+                    if distance>farthestDistance then
+                        farthest,farthestDistance=entry,distance
+                    end
+                end
+            end
+            return farthest,farthestDistance
+        end
+
+        local function stopRevFarmForHour(hourName)
+            if not flags.RevFarm then return end
+
+            local farthest,distance=getFarthestRevFarmTeleport()
+            -- Use the normal toggle callback so all existing farm shutdown behavior
+            -- (camera release, swing release, status, reporting, etc.) stays intact.
+            if RevFarm.toggle then
+                RevFarm.toggle:Set(false)
+            else
+                flags.RevFarm=false
+                RevFarm.target=nil
+                RevFarm.stuckTimer=0
+                RevFarm.ffWaiting=false
+                releaseRevCamera()
+                pcall(stopSwing)
+            end
+
+            if farthest and farthest.pos then
+                teleportTo(CFrame.new(farthest.pos))
+                notify(("Auto Farm stopped for %s → %s"):format(esc(hourName),esc(farthest.label or "safe point")),"warn")
+            else
+                notify(("Auto Farm stopped for %s (no configured safe teleport)"):format(esc(hourName)),"warn")
+            end
+        end
+
+        task.spawn(function()
+            local lastHandledHour=""
+            local lastHourState=false
+
+            while alive do
+                if not flags.RevFarm then
+                    lastHandledHour=""
+                    lastHourState=false
+                    task.wait(0.25)
+                    continue
+                end
+
+                local values=RS:FindFirstChild("Values")
+                local hourActive=values and values:FindFirstChild("HourActive")
+                local hourNameValue=hourActive and hourActive:FindFirstChild("HourName")
+                local active=hourActive and hourActive.Value==true
+                local hourName=hourNameValue and tostring(hourNameValue.Value) or ""
+
+                if active and not lastHourState and hourName~="" and revFarmStopHours[hourName] and hourName~=lastHandledHour then
+                    lastHandledHour=hourName
+                    stopRevFarmForHour(hourName)
+                elseif not active then
+                    lastHourState=false
+                end
+
+                if active then
+                    lastHourState=true
+                end
+
+                task.wait(0.1)
+            end
+        end)
 
         task.spawn(function()
             local SWING_INT   = CONFIG.AutoAttackInterval
             local EQUIP_DELAY = 1.5
             local STUCK_THRESH= 8
-            local TP_INTERVAL = 0.098
+            local TP_INTERVAL = 0.05
             local lastTP      = 0
             local lastNotifyStuck = 0
 
@@ -1174,7 +1490,7 @@ do
                     task.wait(0.35); continue
                 end
 
-                RevFarm.target=sortedRevenants(false)[1]
+                RevFarm.target=sortedRevenants(true)[1]
                 local m=RevFarm.target
                 local part=revPartFor(m)
 
@@ -1192,10 +1508,27 @@ do
                 RevFarm.stuckTimer=0
 
                 if hasForceField(m) then
+                    pcall(stopSwing)
+                    local ffRange=CONFIG.RevFarmForceFieldEscapeRange or 20
+                    local distanceToRev=(part.Position-hrp.Position).Magnitude
+                    if distanceToRev<=ffRange then
+                        local farthest,farthestDistance=getFarthestRevFarmTeleport()
+                        if farthest and farthest.pos then
+                            -- Pick the configured teleport that is farthest from our
+                            -- CURRENT position, then get away from the ForceField.
+                            teleportTo(CFrame.new(farthest.pos))
+                            RevFarm.target=nil
+                            RevFarm.ffWaiting=true
+                            notify(("Revenant ForceField nearby → escaped to %s"):format(esc(farthest.label or "safe point")),"warn")
+                            RevFarm.status.Text=("ForceField nearby: escaped to %s"):format(esc(farthest.label or "safe point"))
+                            task.wait(0.35)
+                            continue
+                        end
+                    end
+
                     if not RevFarm.ffWaiting then
                         RevFarm.ffWaiting=true
                         notify("Revenant has ForceField, waiting...","warn")
-                        pcall(stopSwing)
                     end
                     RevFarm.status.Text=("ForceField active on %s , paused"):format(esc(m.Name))
                     task.wait(0.3); continue
@@ -1205,9 +1538,8 @@ do
                 local tpos=part.Position
                 if tick()-lastTP>=TP_INTERVAL then
                     lastTP=tick()
-                    local flat=Vector3.new(hrp.Position.X-tpos.X,0,hrp.Position.Z-tpos.Z)
-                    if flat.Magnitude<0.1 then flat=Vector3.new(0,0,1) end
-                    local offset=flat.Unit*math.max(RevFarm.dist,1.5)
+                    local angle=tick()*4.7
+                    local offset=Vector3.new(math.cos(angle),0,math.sin(angle))*math.max(RevFarm.dist,1.5)
                     local pos=Vector3.new(tpos.X+offset.X, tpos.Y+CONFIG.RevFarmYOffset, tpos.Z+offset.Z)
                     hrp.CFrame=CFrame.lookAt(pos,Vector3.new(tpos.X,pos.Y,tpos.Z))
                     hrp.AssemblyLinearVelocity=Vector3.zero
@@ -1252,13 +1584,29 @@ do
         local function addTPBtn(label,finder)
             addButton(tpPage,label,function()
                 local cf=targetCF(finder())
-                if cf then teleportTo(cf) tpStatus.Text=("Teleported to %s"):format(label) notify("Teleported → "..label,"info")
+                if cf then teleportTo(cf) tpStatus.Text=("Teleported to %s"):format(label) notify("Teleported to "..label,"info")
                 else tpStatus.Text=('<font color="#ff5a5a">%s not found</font>'):format(esc(label)) notify(label.." not found","error") end
             end)
         end
-        addTPBtn("Shop Pos 1",function() return workspace:FindFirstChild(CONFIG.ShopPos1Name,true) end)
-        addTPBtn("Shop Pos 2",function() return workspace:FindFirstChild(CONFIG.ShopPos2Name,true) end)
+        addTPBtn("Regular Shop",function() return workspace:FindFirstChild(CONFIG.ShopPos1Name,true) end)
+        addTPBtn("Blackmarket",function() return workspace:FindFirstChild(CONFIG.ShopPos2Name,true) end)
         addTPBtn("Power Station Core",findPowerStationCore)
+        -- Coordinate-based locations from CONFIG.SpecificTeleports
+        addSection(tpPage,"Map Locations")
+        for _,entry in ipairs(CONFIG.SpecificTeleports) do
+            local lbl,pos=entry.label,entry.pos
+            addButton(tpPage,lbl,function()
+                local h=getHRP()
+                if h then
+                    h.CFrame=CFrame.new(pos)+CONFIG.TeleportOffset
+                    tpStatus.Text=("Teleported to %s (%d, %d, %d)"):format(lbl,pos.X,pos.Y,pos.Z)
+                    notify("Teleported to "..lbl,"info")
+                else
+                    tpStatus.Text="Character not found"
+                    notify("No character","error")
+                end
+            end)
+        end
         addSection(tpPage,"Status") tpStatus=addLabel(tpPage,"Idle")
     end
 
@@ -1403,9 +1751,9 @@ do
         local function cleanFOVs() local fov=getFOVsFolder() if not fov then return end for _,v in ipairs(fov:GetChildren()) do if v.Name=="EnergizedCCLW" then pcall(function() v:Destroy() end) Drink.fovRemoved+=1 end end end
 
         local rageCC={watched={},removed=0}
-        local function snapCC(cc) return{cc.Brightness,cc.Contrast,cc.Saturation,cc.TintColor} end
-        local function snapshotsDiffer(a,b) return a[1]~=b[1] or a[2]~=b[2] or a[3]~=b[3] or a[4]~=b[4] end
-        local function killRageColorCorrections()
+        function snapCC(cc) return{cc.Brightness,cc.Contrast,cc.Saturation,cc.TintColor} end
+        function snapshotsDiffer(a,b) return a[1]~=b[1] or a[2]~=b[2] or a[3]~=b[3] or a[4]~=b[4] end
+        function killRageColorCorrections()
             local cam=workspace.CurrentCamera if not cam then return end local now=tick() local seen={}
             for _,child in ipairs(cam:GetChildren()) do
                 if child:IsA("ColorCorrectionEffect") then seen[child]=true
@@ -1419,7 +1767,7 @@ do
             for cc in pairs(rageCC.watched) do if not seen[cc] then rageCC.watched[cc]=nil end end
         end
 
-        local function injectEnergizedRage()
+        function injectEnergizedRage()
             local cur=getCurrents_legacy() if not cur then return nil end
             if Drink.inst and Drink.inst.Parent==cur then Drink.inst.Value=true return Drink.inst end
             if Drink.inst then pcall(function() Drink.inst:Destroy() end) Drink.inst=nil end
@@ -1427,12 +1775,12 @@ do
             if not tmpl then return nil end
             local cl=tmpl:Clone() cl.Name="EnergizedCCLW" cl.Value=true cl:SetAttribute("RD_Clone",true) cl.Parent=cur Drink.inst=cl return cl
         end
-        local function removeDrinkClone() if Drink.inst then pcall(function() Drink.inst:Destroy() end) end Drink.inst=nil end
+        function removeDrinkClone() if Drink.inst then pcall(function() Drink.inst:Destroy() end) end Drink.inst=nil end
 
         Drink.toggle=addToggle(playerPage,"Pseudo Infinite Stamina",false,function(v)
             flags.Drink=v
             if not v then removeDrinkClone() Drink.removed=0 Drink.fovRemoved=0 rageCC.removed=0 table.clear(rageCC.watched) if Drink.status then Drink.status.Text="Idle" end end
-        end)
+        end,{keybind=true,key=S.StaminaKey,onKeyChanged=function(k) Drink.key=k S.StaminaKey=k and k.Name or "" end})
         Drink.status=addLabel(playerPage,"Idle")
 
         track(LP.CharacterAdded:Connect(function() Drink.spawnAt=tick() end))
@@ -1456,37 +1804,71 @@ do
             end
         end)
 
-        if S.StaminaKey~="" then local ok,k=pcall(function() return Enum.KeyCode[S.StaminaKey] end) if ok and k then Drink.key=k end end
         _G.__HappyMod_Drink=Drink
     end -- end player block
 
     local Drink=_G.__HappyMod_Drink
 
-    -- ============================================================
-    -- SETTINGS TAB
-    -- ============================================================
     local settingsPage=addTab("Settings")
-    local webhookBox,menuKeyBtn,stamKeyBtn,cfgStatus
+    local webhookBox,menuKeyBtn,cfgStatus
     local themeRefresh=function() end
 
     local function updateKeyLabels()
         if menuKeyBtn then menuKeyBtn.Text=("Menu key: %s (click to change)"):format(CONFIG.ToggleKey.Name) end
-        if stamKeyBtn then stamKeyBtn.Text=Drink.key and ("Stamina key: %s (click to change)"):format(Drink.key.Name) or "Stamina key: none (click to set)" end
+        for _,o in pairs(toggleBindReg) do
+            if o.KeyButton then
+                o.KeyButton.Text=o.Key and o.Key.Name or "NONE"
+                o.KeyButton.TextColor3=o.Key and T.text or T.dim
+            end
+        end
     end
 
     local function collectConfig()
-        local data={version=4,settings={},toggles={},sliders={},farm={},webhook=(_G.__RS_webhookUrl or "")}
+        local data={schema=6,version=CONFIG.Version,lastSeenVersion=Saved.lastSeenVersion,settings={},toggles={},sliders={},keybinds={},farm={},webhook=(_G.__RS_webhookUrl or "")}
         for k,v in pairs(S) do data.settings[k]=v end
         for name,o in pairs(toggleReg) do data.toggles[name]=o.State end
         for name,o in pairs(sliderReg) do data.sliders[name]=o.Value end
+        for name,o in pairs(toggleBindReg) do if o.Key then data.keybinds[name]=o.Key.Name end end
         data.farm={tool=RevFarm.tool,body=RevFarm.body,custom=RevFarm.customList} return data
     end
 
     local function applySaved(data,restoreFeatures)
         if type(data)~="table" then return end
-        if type(data.settings)=="table" then for k,v in pairs(data.settings) do if S[k]~=nil and type(S[k])==type(v) then S[k]=v local o=settingsReg[k] if o then if o.Kind=="slider" then o:Set(v) else o:Set(v,true) end end end end end
-        do local ok,k=pcall(function() return Enum.KeyCode[S.ToggleKey] end) if ok and k then CONFIG.ToggleKey=k end Drink.key=nil if S.StaminaKey~="" then local ok2,k2=pcall(function() return Enum.KeyCode[S.StaminaKey] end) if ok2 and k2 then Drink.key=k2 end end end
-        if type(data.webhook)=="string" then _G.__RS_webhookUrl=data.webhook if webhookBox then webhookBox.Text=data.webhook end end
+        if type(data.settings)=="table" then
+            for k,v in pairs(data.settings) do
+                if S[k]~=nil and type(S[k])==type(v) then
+                    S[k]=v
+                    local o=settingsReg[k]
+                    if o then
+                        if o.Kind=="slider" then o:Set(v) else o:Set(v,true) end
+                    end
+                end
+            end
+        end
+
+        do
+            local ok,k=pcall(function() return Enum.KeyCode[S.ToggleKey] end)
+            if ok and k then CONFIG.ToggleKey=k end
+            if Drink.toggle and Drink.toggle.SetKey then
+                Drink.toggle:SetKey(nil,true)
+                if S.StaminaKey~="" then
+                    local ok2,k2=pcall(function() return Enum.KeyCode[S.StaminaKey] end)
+                    if ok2 and k2 then Drink.toggle:SetKey(k2,true) end
+                end
+            end
+        end
+
+        if type(data.keybinds)=="table" then
+            for name,keyName in pairs(data.keybinds) do
+                local o=toggleBindReg[name]
+                if o and o.SetKey then
+                    local ok,k=pcall(function() return Enum.KeyCode[keyName] end)
+                    if ok and k then o:SetKey(k,true) end
+                end
+            end
+        end
+
+        if type(data.webhook)=="string" then _G.__RS_webhookUrl=data.webhook:gsub("%s+","") if webhookBox then webhookBox.Text=data.webhook end end
         if type(data.farm)=="table" then
             if type(data.farm.custom)=="table" then for _,n in ipairs(data.farm.custom) do if type(n)=="string" and n~="" then RevFarm.addToolRow(n,false,true) end end end
             if type(data.farm.tool)=="string" and data.farm.tool~="" then RevFarm.selectTool(data.farm.tool) end
@@ -1543,6 +1925,9 @@ do
         themeRefresh=function() for name,b in pairs(themeBtns) do b.Text=(name==S.Theme) and ("● "..name) or name end end themeRefresh()
     end
 
+    addSection(settingsPage,"Accessibility")
+    addToggle(settingsPage,"UI animations",S.UIAnimations,function(v) S.UIAnimations=v end,{setting="UIAnimations"})
+
     local transSlider
     transSlider=addSlider(settingsPage,"Window transparency",0,60,S.Transparency,function(v) S.Transparency=v transSlider.Label.Text=("Transparency: %d%%"):format(v) applyLook() end,{setting="Transparency"})
     transSlider.Label.Text=("Transparency: %d%%"):format(S.Transparency)
@@ -1557,24 +1942,25 @@ do
     durSlider.Label.Text=("Duration: %d s"):format(S.NotifDuration)
     addButton(settingsPage,"Preview notifications",function() for _,k in ipairs({"success","info","sell","farm","warn","error","neutral"}) do notify(k,k) task.wait(0.12) end end)
 
-    addSection(settingsPage,"Keybinds")
+    addSection(settingsPage,"Global Keybind")
     menuKeyBtn=addButton(settingsPage,"",function() bindMode="menu" menuKeyBtn.Text="Press a key... (Esc cancels)" end)
-    stamKeyBtn=addButton(settingsPage,"",function() bindMode="stamina" stamKeyBtn.Text="Press a key... (Esc clears)" end)
     updateKeyLabels()
 
     addSection(settingsPage,"Discord Webhook")
     local webhookUrl_inner=(type(Saved.webhook)=="string") and Saved.webhook or ""
     _G.__RS_webhookUrl=webhookUrl_inner
     webhookBox=addTextbox(settingsPage,"https://discord.com/api/webhooks/...",function(t)
-        _G.__RS_webhookUrl=(t:gsub("%s+","")) if _G.__RS_webhookUrl~="" then notify("Webhook URL updated, save config to keep it","info") end
+        _G.__RS_webhookUrl=(t:gsub("%s+",""))
+        if _G.__RS_webhookUrl~="" then notify("Webhook URL updated, save config to keep it","info") else notify("Webhook URL cleared","warn") end
     end)
     webhookBox.Text=webhookUrl_inner
     addToggle(settingsPage,"Use Webhook",false,function(v) flags.Webhook=v end)
     addToggle(settingsPage,"Notify on Revenant events",true,function(v) flags.WebhookRev=v end)
     addButton(settingsPage,"Send test webhook",function()
         local sw=_G.__RS_sendWebhook
-        if sw then sw("Mod Menu, test ping",{{name="Status",value="Online",inline=true},{name="Server",value=game.JobId~="" and game.JobId:sub(1,20) or "Studio",inline=true}},0x46C86E,true) end
-        notify("Test webhook sent","info")
+        if not sw then notify("Webhook sender unavailable","error") return end
+        local ok,err=sw("Mod Menu, test ping",{{name="Status",value="Online",inline=true},{name="Server",value=game.JobId~="" and game.JobId:sub(1,20) or "Studio",inline=true}},0x46C86E,true)
+        if ok then notify("Test webhook sent","success") else notify("Webhook failed: "..tostring(err),"error") end
     end)
 
     addSection(settingsPage,"Danger Zone")
@@ -1597,19 +1983,68 @@ do
     track(UIS.InputBegan:Connect(function(i,gp)
         if bindMode then
             if i.UserInputType~=Enum.UserInputType.Keyboard then return end
-            local mode=bindMode bindMode=nil bindDone=tick()
-            if mode=="stamina" then
-                if i.KeyCode==Enum.KeyCode.Escape then Drink.key,S.StaminaKey=nil,""
-                elseif i.KeyCode==CONFIG.ToggleKey then notify(CONFIG.ToggleKey.Name.." is the menu key, pick another","warn")
-                else Drink.key,S.StaminaKey=i.KeyCode,i.KeyCode.Name notify("Stamina keybind: "..i.KeyCode.Name,"info") end
-            else
-                if i.KeyCode==Enum.KeyCode.Escape then -- cancelled
-                elseif i.KeyCode==Drink.key then notify(i.KeyCode.Name.." is used by stamina keybind","warn")
-                else CONFIG.ToggleKey,S.ToggleKey=i.KeyCode,i.KeyCode.Name notify("Menu key: "..i.KeyCode.Name,"info") end
+            local mode=bindMode
+            bindMode=nil
+            bindDone=tick()
+
+            if mode.kind=="toggle" then
+                local obj=mode.obj
+                if not obj then return end
+
+                if i.KeyCode==Enum.KeyCode.Escape then
+                    if mode.button then
+                        mode.button.Text=obj.Key and obj.Key.Name or "NONE"
+                        mode.button.TextColor3=obj.Key and T.text or T.dim
+                    end
+                elseif i.KeyCode==Enum.KeyCode.Backspace or i.KeyCode==Enum.KeyCode.Delete then
+                    obj:SetKey(nil)
+                elseif i.KeyCode==CONFIG.ToggleKey then
+                    notify(i.KeyCode.Name.." is reserved for the menu key","warn")
+                    if mode.button then mode.button.Text=obj.Key and obj.Key.Name or "NONE" end
+                else
+                    local usedBy
+                    for name,o in pairs(toggleBindReg) do
+                        if o~=obj and o.Key==i.KeyCode then usedBy=name break end
+                    end
+                    if usedBy then
+                        notify(i.KeyCode.Name.." is already bound to "..usedBy,"warn")
+                        if mode.button then mode.button.Text=obj.Key and obj.Key.Name or "NONE" end
+                    else
+                        obj:SetKey(i.KeyCode)
+                    end
+                end
+                updateKeyLabels()
+                return
             end
-            updateKeyLabels() return
+
+            -- Global menu key
+            if i.KeyCode==Enum.KeyCode.Escape then
+                updateKeyLabels()
+            elseif i.KeyCode==Enum.KeyCode.Backspace or i.KeyCode==Enum.KeyCode.Delete then
+                notify("Menu key cannot be cleared","warn")
+                updateKeyLabels()
+            else
+                local staminaKey
+                for _,o in pairs(toggleBindReg) do if o.Key then staminaKey=o.Key end end
+                if i.KeyCode==staminaKey then
+                    notify(i.KeyCode.Name.." is used by a feature keybind","warn")
+                else
+                    CONFIG.ToggleKey,S.ToggleKey=i.KeyCode,i.KeyCode.Name
+                    notify("Menu key: "..i.KeyCode.Name,"info")
+                    updateKeyLabels()
+                end
+            end
+            return
         end
-        if not gp and Drink.key and i.KeyCode==Drink.key and Drink.toggle then Drink.toggle:Set(not Drink.toggle.State) end
+
+        if not gp then
+            for _,o in pairs(toggleBindReg) do
+                if o.Key and i.KeyCode==o.Key then
+                    o:Set(not o.State)
+                    return
+                end
+            end
+        end
     end))
 end -- end window do
 
@@ -1628,6 +2063,7 @@ local function closeAll()
     alive=false
     for _,t in ipairs(toggles) do pcall(function() t:Set(false,true) end) end
     table.clear(flags)
+    Share.scrapBusy=false
     for name in pairs(table.clone(currentKeepalive)) do currentKeepalive[name]=nil removeCurrent(name) end
     for name in pairs(table.clone(numCurrentKeepalive)) do numCurrentKeepalive[name]=nil removeNumCurrent(name) end
     if restorePromptHolds then restorePromptHolds() end
@@ -1658,6 +2094,7 @@ if S.ShowLoading then
 end
 
 local function fadeOut(root,t)
+    if not S.UIAnimations then root:Destroy() return end
     local ti=TweenInfo.new(t,Enum.EasingStyle.Quad)
     for _,d in ipairs(root:GetDescendants()) do
         local props={}
@@ -1698,6 +2135,57 @@ task.spawn(function()
     if not alive then return end
     if loadUI and loadUI.frame and loadUI.frame.Parent then loadUI.frame:Destroy() end
     win.Visible=true loadingDone=true applyLook()
+
+    -- Show the current update once, then remember this version.
+    if updateAvailable() then
+        markVersionSeen()
+        local popup=new("Frame",{
+            Name="UpdateLog",AnchorPoint=Vector2.new(0.5,0.5),
+            Position=UDim2.fromScale(0.5,0.5),Size=UDim2.fromOffset(430,280),
+            BackgroundColor3=T.top,BorderSizePixel=0,ZIndex=1000,Parent=gui
+        },{corner(8),new("UIStroke",{Color=T.accent,Thickness=1.5})})
+
+        local popupDrag=new("Frame",{Size=UDim2.new(1,0,0,38),BackgroundTransparency=1,Active=true,ZIndex=1002,Parent=popup})
+        local popupTitle=new("TextLabel",{
+            BackgroundTransparency=1,Position=UDim2.fromOffset(16,12),
+            Size=UDim2.new(1,-32,0,24),Text="UPDATE AVAILABLE",
+            TextColor3=T.accent,Font=Enum.Font.GothamBold,TextSize=15,
+            TextXAlignment=Enum.TextXAlignment.Left,ZIndex=1003,Parent=popupDrag
+        })
+        makeDraggable(popupDrag,popup)
+        new("TextLabel",{
+            BackgroundTransparency=1,Position=UDim2.fromOffset(16,40),
+            Size=UDim2.new(1,-32,0,18),Text=("Version %s"):format(CONFIG.Version),
+            TextColor3=T.text,Font=Enum.Font.GothamMedium,TextSize=12,
+            TextXAlignment=Enum.TextXAlignment.Left,ZIndex=1001,Parent=popup
+        })
+
+        local body={}
+        for _,line in ipairs(CONFIG.UpdateLog) do body[#body+1]="• "..tostring(line) end
+        new("TextLabel",{
+            BackgroundTransparency=1,Position=UDim2.fromOffset(16,70),
+            Size=UDim2.new(1,-32,1,-120),Text=table.concat(body,"\n"),
+            TextColor3=T.text,Font=Enum.Font.Gotham,TextSize=12,
+            TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+            TextYAlignment=Enum.TextYAlignment.Top,ZIndex=1001,Parent=popup
+        })
+
+        local ok=new("TextButton",{
+            AnchorPoint=Vector2.new(1,1),Position=UDim2.new(1,-16,1,-14),
+            Size=UDim2.fromOffset(100,28),BackgroundColor3=T.accent,
+            Text="Got it",TextColor3=Color3.new(1,1,1),
+            Font=Enum.Font.GothamBold,TextSize=12,ZIndex=1001,Parent=popup
+        },{corner(6)})
+
+        track(ok.Activated:Connect(function()
+            uiPulse(ok)
+            if S.UIAnimations then
+                uiTween(popup,{BackgroundTransparency=1},0.14)
+                task.delay(0.14,function() if popup.Parent then popup:Destroy() end end)
+            else popup:Destroy() end
+        end))
+    end
+
     notify(("Mod menu loaded. Press %s to toggle."):format(CONFIG.ToggleKey.Name),"info")
 end)
 
